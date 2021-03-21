@@ -1,0 +1,207 @@
+#!/sbin/openrc-run
+# Copyright 1999-2017 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+CONTAINER=${SVCNAME#*.}
+
+LXC_USER=${LXC_USER:-lxc-${CONTAINER}}
+LXC_GROUP=${LXC_GROUP:-lxc-user}
+LXC_IONICE=${LXC_IONICE:-0}
+LXC_NICE=${LXC_NICE:-0}
+LXC_PATH=/store/lxc
+LXC_START_WAIT=${LXC_START_WAIT:-3}
+LXC_STOP_WAIT=${LXC_STOP_WAIT:-10}
+
+description="Syncthing within LXC"
+
+lxc_get_configfile() {
+	if [ -f "${LXC_PATH}/${CONTAINER}.conf" ]; then
+		echo "${LXC_PATH}/${CONTAINER}.conf"
+	elif [ -f "${LXC_PATH}/${CONTAINER}/config" ]; then
+		echo "${LXC_PATH}/${CONTAINER}/config"
+	else
+		eerror "Unable to find a suitable configuration file for ${CONTAINER}."
+		eerror "If you set up the container in a non-standard"
+		eerror "location, please set the CONFIGFILE variable."
+		return 1
+	fi
+}
+
+[ $CONTAINER != $SVCNAME ] && CONFIGFILE=${CONFIGFILE:-$(lxc_get_configfile)}
+
+lxc_get_var() {
+	awk 'BEGIN { FS="[ \t]*=[ \t]*" } $1 == "'$1'" { print $2; exit }' ${CONFIGFILE}
+}
+
+lxc_get_net_link_type() {
+	awk 'BEGIN { FS="[ \t]*=[ \t]*"; _link=""; _type="" }
+		$1 == "lxc.network.type" {_type=$2;}
+		$1 == "lxc.network.link" {_link=$2;}
+		match($1, /lxc\.net\.[[:digit:]]+\.type/) {_type=$2;}
+		match($1, /lxc\.net\.[[:digit:]]+\.link/) {_link=$2;}
+		{if(_link != "" && _type != ""){
+			printf("%s:%s\n", _link, _type );
+			_link=""; _type="";
+		}; }' <${CONFIGFILE}
+}
+
+checkconfig() {
+	if [ ${CONTAINER} = ${SVCNAME} ]; then
+		eerror "You have to create an init script for each container:"
+		eerror " ln -s lxc /etc/init.d/lxc-user.container"
+		return 1
+	fi
+
+	# no need to output anything, the function takes care of that.
+	[ -z "${CONFIGFILE}" ] && return 1
+
+	utsname=$(lxc_get_var lxc.uts.name)
+	if [ -z "$utsname" ] ; then
+		utsname=$(lxc_get_var lxc.utsname)
+	fi
+
+	if [ "${CONTAINER}" != "${utsname}" ]; then
+	    eerror "You should use the same name for the service and the"
+	    eerror "container. Right now the container is called ${utsname}"
+	    return 1
+	fi
+}
+
+depend() {
+	# be quiet, since we have to run depend() also for the
+	# non-muxed init script, unfortunately.
+	checkconfig 2>/dev/null || return 0
+
+	config ${CONFIGFILE}
+	need localmount
+	use lxcfs net netmount
+	after sshd dns dhcp samba mta
+
+	local _x _if
+	for _x in $(lxc_get_net_link_type); do
+		_if=${_x%:*}
+		case "${_x##*:}" in
+			# when the network type is set to phys, we can make use of a
+			# network service (for instance to set it up before we disable
+			# the net_admin capability), but we might also not set it up
+			# at all on the host and leave the net_admin capable service
+			# to take care of it.
+			phys)	use net.${_if} ;;
+			*)	need net.${_if} ;;
+		esac
+	done
+}
+
+cgroup_systemd_enable() {
+	mount | grep -q /sys/fs/cgroup/systemd && return
+	mkdir -p /sys/fs/cgroup/systemd
+	mount -t cgroup cgroup -o none,name=systemd /sys/fs/cgroup/systemd
+}
+
+cgroup_clone_enable() {
+	grep -q 1 /sys/fs/cgroup/cpuset/cgroup.clone_children || echo 1 > /sys/fs/cgroup/cpuset/cgroup.clone_children
+	grep -q 1 /sys/fs/cgroup/memory/memory.use_hierarchy || echo 1 > /sys/fs/cgroup/memory/memory.use_hierarchy
+}
+
+cgroup_namespace_create() {
+	#for d in `lssubsys -am | gawk '{ print $2 }'`; do {
+	for d in cpuset cpu cpuacct memory devices pids; do { d=/sys/fs/cgroup/$d
+		[ -d $d/$1 ] || mkdir -p $d/$1
+		chown -R $2 $d/$1
+		echo $$ > $d/$1/tasks
+	} done
+}
+
+setup_log_dir() {
+	logpath=/var/log/lxc/${CONTAINER}
+	if [ ! -d ${logpath} ]; then
+		mkdir -p -m 0750 ${logpath} 
+		for uid in $(awk 'BEGIN { FS="[ \t]*=[ \t]*" } $1 == "lxc.idmap" { print $2 }' ${CONFIGFILE} | sed 's/ /_/g'); do {
+			case ${uid} in
+				u*)
+					lxc_subuid=$(echo ${uid} | awk 'BEGIN { FS="_" } { print $3 }') ;;
+				g*)
+					lxc_subgid=$(echo ${uid} | awk 'BEGIN { FS="_" } { print $3 }') ;;
+				*)
+					;;
+			esac
+		} done
+		chown ${lxc_subuid}.${lxc_subgid} ${logpath} 
+	fi
+}
+
+setup_device_limit() {
+	cgroup_device=$(lssubsys -m devices | awk '{ print $2 }')
+	lxc_get_var lxc.cgroup.devices.deny > ${cgroup_device}/${CONTAINER}/devices.deny
+	awk 'BEGIN { FS="[ \t]*=[ \t]*" } $1 == "lxc.cgroup.devices.allow" { print $2 }' ${CONFIGFILE} > ${cgroup_device}/${CONTAINER}/devices.allow
+}
+
+start() {
+	checkconfig || return 1
+
+	lxc_log=/var/log/lxc/${CONTAINER}.log
+
+	checkpath -f -o ${LXC_USER}:${LXC_GROUP} ${lxc_log}
+	truncate -s 0 ${lxc_log} 2>/dev/null
+
+	#cgroup_systemd_enable
+	cgroup_clone_enable
+	cgroup_namespace_create ${CONTAINER} ${LXC_USER}.${LXC_GROUP}
+	setup_log_dir
+	setup_device_limit
+
+	# Check the format of our init and the chroot's init, to see
+	# if we have to use linux32 or linux64; always use setarch
+	# when required, as that makes it easier to deal with
+	# x32-based containers.
+	case $(scanelf -BF '%a#f' $(lxc_get_var lxc.rootfs)/sbin/init) in
+		EM_X86_64)	setarch=linux64;;
+		EM_386)		setarch=linux32;;
+	esac
+
+	ebegin "Starting lxc user container ${CONTAINER}"
+	start-stop-daemon --start --user ${LXC_USER} --group ${LXC_GROUP} \
+		--ionice ${LXC_IONICE} --nicelevel ${LXC_NICE} \
+		--exec $(which lxc-start) -- -d -n ${CONTAINER} \
+		-P ${LXC_PATH} -o ${lxc_log}
+
+	# lxc-start -d will _always_ report a correct startup, even if it
+	# failed, so rather than trust that, check that the cgroup exists.
+	counter=0
+	while [ ${counter} -lt ${LXC_START_WAIT} ]; do {
+		sleep 1
+		[ "$(lxc-info -s -H ${CONTAINER})" = "RUNNING" ] && break
+		let counter+=1
+	} done
+	eend $?
+}
+
+stop() {
+	checkconfig || return 1
+
+	if [ "$(lxc-info -s -H ${CONTAINER})" != "RUNNING" ]; then
+	    ewarn "${CONTAINER} doesn't seem to be started."
+	    return 0
+	fi
+
+	# 10s should be enough to shut everything down
+	ebegin "Stopping lxc user container ${CONTAINER}"
+	start-stop-daemon --start --user ${LXC_USER} --group ${LXC_GROUP} \
+		--exec $(which lxc-stop) -- -t ${LXC_STOP_WAIT} -n ${CONTAINER} -P ${LXC_PATH}
+	eend $?
+
+	# clean cgroup entries
+	lscgroup | grep ":/${CONTAINER}$" | xargs cgdelete -r
+
+	# clean openrc status
+	#[ -f /run/openrc/started/lxc-user.${CONTAINER} ] && rm -f /run/openrc/started/lxc-user.${CONTAINER}
+
+	# remove veth
+	veth=veth$(id -u ${LXC_USER})_
+	veth=$(ip link show type veth | grep ${veth} | sed 's/@/ /' | awk '{ print $2 }')
+	if [ "x${veth}" != "x" ];then
+		ip link delete ${veth} 2>/dev/null
+	fi
+
+	return 0
+}

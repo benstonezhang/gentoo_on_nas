@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# Copyright 1999-2017 Gentoo Foundation
+# Distributed under the terms of the GNU General Public License v2
+
+description="RAID repair daemon"
+command="/usr/local/sbin/mdcsrepaird"
+command_args="-l -v -p /usr/local/sbin/mdcsrepair"
+
+pidfile="/run/mdcsrepaird.pid"
+start_stop_daemon_args="--background --make-pidfile"
+
+depend() {
+	need localmount
+	use logger
+}
