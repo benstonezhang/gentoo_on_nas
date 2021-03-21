@@ -48,7 +48,7 @@ lxc_get_net_link_type() {
 checkconfig() {
 	if [ ${CONTAINER} = ${SVCNAME} ]; then
 		eerror "You have to create an init script for each container:"
-		eerror " ln -s lxc /etc/init.d/lxc-user.container"
+		eerror " ln -s /etc/init.d/lxc-user /etc/init.d/lxc-user.container"
 		return 1
 	fi
 
