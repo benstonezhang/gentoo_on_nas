@@ -1,0 +1,1 @@
+/var/log/lxc(/.*)?			gen_context(system_u:object_r:lxc_log_t,s0)

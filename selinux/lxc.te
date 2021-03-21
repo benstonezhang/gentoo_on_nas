@@ -1,0 +1,124 @@
+#
+# SELinux policy for LXC for RHEL/CentOS/Oracle 6.5.
+# It attempts to restrict the container to the same amount of access
+# as an unprivileged user. To build and insert this policy module:
+#
+# make -f /usr/share/selinux/devel/Makefile lxc.pp
+# semodule -i lxc.pp
+#
+# In your container's lxc config:
+#   lxc.selinux.context = system_u:system_r:lxc_t:s0:c62,c86,c150,c228
+#
+# Ensure your container's rootfs files are labeled:
+#   chcon -R system_u:object_r:lxc_file_t:s0:c62,c86,c150,c228 /path/to/rootfs
+#
+# To keep containers separated from each other, you should vary the MCS
+# portion of the contexts above to be a unique set of values for each
+# container, each MCS compartment can be a number from 0-1023.
+#
+
+policy_module(lxc,0.35)
+
+# allow regular user run lxc
+role lxc_r;
+userdom_unpriv_user_template(lxc)
+
+type lxc_file_t;
+files_type(lxc_file_t);
+role system_r types { lxc_t lxc_file_t };
+
+domtrans_pattern(initrc_t, lxc_file_t, lxc_t)
+
+gen_require(`
+	type devpts_t;
+	type initrc_devpts_t;
+	type initrc_state_t;
+	type proc_t;
+	type ssh_port_t;
+	type sysadm_t;
+	type sysctl_kernel_t;
+	type sysctl_modprobe_t;
+	type sysctl_net_t;
+	type tmpfs_t;
+	type unconfined_t;
+	class filesystem { associate mount relabelfrom unmount };
+	class process { execmem dyntransition rlimitinh siginh setkeycreate transition };
+	class chr_file { getattr ioctl open read write };
+	class dir { add_name create getattr open read remove_name search setattr write };
+	class file { append create getattr ioctl lock open read rename setattr unlink write };
+	class lnk_file { create read };
+	class capability { dac_override dac_read_search fsetid ipc_lock kill net_admin net_bind_service net_broadcast net_raw setuid sys_admin sys_boot sys_tty_config };
+');
+
+# So lxc can transition to lxc_t on exec
+allow unconfined_t lxc_t:process transition;
+can_exec(lxc_t, lxc_file_t)
+
+# So lxc can dyntransition to lxc_t for attach executing a function
+allow unconfined_t lxc_t:process dyntransition;
+
+# So lxc-start can relabel the pty allocated for the console
+allow lxc_file_t devpts_t:filesystem associate;
+
+allow lxc_t initrc_devpts_t:chr_file { getattr ioctl open read write };
+allow lxc_t initrc_state_t:dir { add_name create getattr open read remove_name search setattr write };
+allow lxc_t initrc_state_t:file { append create getattr ioctl lock open read rename setattr unlink write };
+allow lxc_t initrc_state_t:lnk_file { create read };
+
+# So container can mount /dev/shm and relabel it
+allow lxc_t tmpfs_t:filesystem relabelfrom;
+
+# Allow all access to an lxc_file_t type; devices can be restricted
+# with the device cgroup, they are not here
+allow lxc_t lxc_file_t:file *;
+allow lxc_t lxc_file_t:lnk_file *;
+allow lxc_t lxc_file_t:chr_file *;
+allow lxc_t lxc_file_t:blk_file *;
+allow lxc_t lxc_file_t:sock_file *;
+allow lxc_t lxc_file_t:fifo_file *;
+allow lxc_t lxc_file_t:socket *;
+allow lxc_t lxc_file_t:dir *;
+allow lxc_t lxc_file_t:filesystem unmount;
+
+fs_unmount_all_fs(lxc_t)
+
+allow lxc_t proc_t:dir mounton;
+allow lxc_t proc_t:filesystem mount;
+
+allow lxc_t tmpfs_t:filesystem mount;
+allow lxc_t self:capability { dac_override dac_read_search fsetid ipc_lock kill net_admin net_bind_service net_broadcast net_raw setuid sys_admin sys_boot sys_tty_config };
+allow lxc_t self:cap_userns { chown dac_override fowner kill setgid setuid };
+
+allow lxc_t sysctl_net_t:file write;
+
+corenet_tcp_connect_all_ports(lxc_t)
+corenet_tcp_bind_all_ports(lxc_t)
+corenet_udp_bind_all_ports(lxc_t)
+
+# Needed for ifup/ip/dhcp
+allow lxc_t self:packet_socket create_socket_perms;
+allow lxc_t self:rawip_socket create_socket_perms;
+allow lxc_t self:netlink_route_socket create_netlink_socket_perms;
+
+# Needed to set label that the keyring will be created with
+allow lxc_t self:process { setkeycreate };
+
+dontaudit lxc_t sysctl_kernel_t:file write;
+dontaudit lxc_t sysctl_modprobe_t:file write;
+
+#============= lxc_log_t ==============
+type lxc_log_t;
+logging_log_file(lxc_log_t)
+# Be able to create and append to its own log files
+allow lxc_t lxc_log_t:dir { add_name create_dir_perms list_dir_perms open read remove_name rmdir setattr write };
+allow lxc_t lxc_log_t:file { append_file_perms create_file_perms open read relabelto rename setattr unlink write };
+
+allow sysadm_t lxc_t:process { dyntransition rlimitinh siginh transition };
+allow sysadm_t lxc_file_t:file { execute read };
+allow sysadm_t lxc_file_t:chr_file setattr;
+allow sysadm_t lxc_file_t:lnk_file read;
+
+# for Wine
+allow lxc_t self:process execmem;
+allow lxc_t initrc_state_t:sock_file { create setattr unlink };
+
