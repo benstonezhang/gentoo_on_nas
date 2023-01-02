@@ -126,7 +126,7 @@ setup_log_dir() {
 					;;
 			esac
 		} done
-		chown ${lxc_subuid}.${lxc_subgid} ${logpath} 
+		chown ${lxc_subuid}:${lxc_subgid} ${logpath} 
 	fi
 }
 
@@ -140,13 +140,16 @@ start() {
 	checkconfig || return 1
 
 	lxc_log=/var/log/lxc/${CONTAINER}.log
+	lxc_out=/var/log/lxc/${CONTAINER}.out
 
 	checkpath -f -o ${LXC_USER}:${LXC_GROUP} ${lxc_log}
+	checkpath -f -o ${LXC_USER}:${LXC_GROUP} ${lxc_out}
 	truncate -s 0 ${lxc_log} 2>/dev/null
+	truncate -s 0 ${lxc_out} 2>/dev/null
 
 	#cgroup_systemd_enable
 	cgroup_clone_enable
-	cgroup_namespace_create ${CONTAINER} ${LXC_USER}.${LXC_GROUP}
+	cgroup_namespace_create ${CONTAINER} ${LXC_USER}:${LXC_GROUP}
 	setup_log_dir
 	setup_device_limit
 
@@ -163,7 +166,7 @@ start() {
 	start-stop-daemon --start --user ${LXC_USER} --group ${LXC_GROUP} \
 		--ionice ${LXC_IONICE} --nicelevel ${LXC_NICE} \
 		--exec $(which lxc-start) -- -d -n ${CONTAINER} \
-		-P ${LXC_PATH} -o ${lxc_log}
+		-P ${LXC_PATH} -o ${lxc_log} -L ${lxc_out} -l trace
 
 	# lxc-start -d will _always_ report a correct startup, even if it
 	# failed, so rather than trust that, check that the cgroup exists.
