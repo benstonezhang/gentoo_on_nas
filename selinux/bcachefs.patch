@@ -1,0 +1,36 @@
+diff -ru a/refpolicy/Makefile b/refpolicy/Makefile
+--- a/refpolicy/Makefile	2023-05-18 23:22:36.269990240 -0000
++++ b/refpolicy/Makefile	2023-05-18 23:31:58.839983318 -0000
+@@ -326,8 +326,8 @@
+ off_mods += $(filter-out $(base_mods) $(mod_mods) $(off_mods),$(notdir $(detected_mods)))
+ 
+ # filesystems to be used in labeling targets
+-filesystems = $(shell mount | grep -v "context=" | $(GREP) -v '\((|.*,)bind(,.*|)\)' | $(AWK) '/(ext[234]|btrfs| xfs| jfs).*rw/{print $$3}';)
+-fs_names := "btrfs ext2 ext3 ext4 xfs jfs"
++filesystems = $(shell mount | grep -v "context=" | $(GREP) -v '\((|.*,)bind(,.*|)\)' | $(AWK) '/(ext[234]|bcachefs|btrfs| xfs| jfs).*rw/{print $$3}';)
++fs_names := "bcachefs btrfs ext2 ext3 ext4 xfs jfs"
+ 
+ ########################################
+ #
+diff -ru a/refpolicy/policy/modules/kernel/devices.fc b/refpolicy/policy/modules/kernel/devices.fc
+--- a/refpolicy/policy/modules/kernel/devices.fc	2023-05-18 23:22:36.319990239 -0000
++++ b/refpolicy/policy/modules/kernel/devices.fc	2023-05-18 23:29:47.239984937 -0000
+@@ -17,6 +17,7 @@
+ /dev/autofs.*		-c	gen_context(system_u:object_r:autofs_device_t,s0)
+ /dev/beep		-c	gen_context(system_u:object_r:sound_device_t,s0)
+ /dev/btrfs-control	-c	gen_context(system_u:object_r:lvm_control_t,s0)
++/dev/bcachefs[0-9]*-ctl	-c	gen_context(system_u:object_r:lvm_control_t,s0)
+ /dev/cachefiles		-c	gen_context(system_u:object_r:cachefiles_device_t,s0)
+ /dev/controlD64		-c	gen_context(system_u:object_r:xserver_misc_device_t,s0)
+ /dev/crash		-c	gen_context(system_u:object_r:crash_device_t,mls_systemhigh)
+diff -ru a/refpolicy/policy/modules/kernel/filesystem.te b/refpolicy/policy/modules/kernel/filesystem.te
+--- a/refpolicy/policy/modules/kernel/filesystem.te	2023-05-18 23:22:36.319990239 -0000
++++ b/refpolicy/policy/modules/kernel/filesystem.te	2023-05-18 23:27:44.539986447 -0000
+@@ -23,6 +23,7 @@
+ 
+ # Use xattrs for the following filesystem types.
+ # Requires that a security xattr handler exist for the filesystem.
++fs_use_xattr bcachefs gen_context(system_u:object_r:fs_t,s0);
+ fs_use_xattr btrfs gen_context(system_u:object_r:fs_t,s0);
+ fs_use_xattr ceph gen_context(system_u:object_r:fs_t,s0);
+ fs_use_xattr encfs gen_context(system_u:object_r:fs_t,s0);
