@@ -1,0 +1,100 @@
+diff -ruN a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+--- a/fs/btrfs/inode.c	2023-05-09 20:44:21.321953825 +0800
++++ b/fs/btrfs/inode.c	2023-05-09 20:45:17.592226037 +0800
+@@ -5929,6 +5929,13 @@
+ 		put_unaligned(name_len, &entry->name_len);
+ 		put_unaligned(fs_ftype_to_dtype(ftype), &entry->type);
+ 		btrfs_dir_item_key_to_cpu(leaf, di, &location);
++
++		/* Skip the snapper '.snapshots' subvolume */
++		if (location.type == BTRFS_ROOT_ITEM_KEY &&
++		    strncmp(name_ptr, ".snapshots", 10) == 0) {
++			continue;
++		}
++
+ 		put_unaligned(location.objectid, &entry->ino);
+ 		put_unaligned(found_key.offset, &entry->offset);
+ 		entries++;
+diff -ruN a/fs/btrfs/qgroup.c b/fs/btrfs/qgroup.c
+--- a/fs/btrfs/qgroup.c	2023-05-09 20:44:21.321953825 +0800
++++ b/fs/btrfs/qgroup.c	2023-05-09 20:45:17.592226037 +0800
+@@ -1090,10 +1090,18 @@
+ 		btrfs_item_key_to_cpu(leaf, &found_key, slot);
+ 
+ 		if (found_key.type == BTRFS_ROOT_REF_KEY) {
++			struct btrfs_root *root;
+ 
+ 			/* Release locks on tree_root before we access quota_root */
+ 			btrfs_release_path(path);
+ 
++			key.objectid = found_key.offset;
++			key.type = BTRFS_ROOT_ITEM_KEY;
++			key.offset = (u64)-1;
++			root = btrfs_get_new_fs_root(fs_info, key.objectid, 0);
++			if (IS_ERR(root) || btrfs_root_readonly(root))
++				goto next_item;
++
+ 			ret = add_qgroup_item(trans, quota_root,
+ 					      found_key.offset);
+ 			if (ret) {
+@@ -1127,6 +1135,7 @@
+ 				continue;
+ 			}
+ 		}
++next_item:
+ 		ret = btrfs_next_item(tree_root, path);
+ 		if (ret < 0) {
+ 			btrfs_abort_transaction(trans, ret);
+diff -ruN a/fs/btrfs/relocation.c b/fs/btrfs/relocation.c
+--- a/fs/btrfs/relocation.c	2023-05-09 20:44:21.321953825 +0800
++++ b/fs/btrfs/relocation.c	2023-05-09 20:45:17.602226085 +0800
+@@ -1290,7 +1290,26 @@
+ 			new_ptr_gen = 0;
+ 		}
+ 
+-		if (WARN_ON(new_bytenr > 0 && new_bytenr == old_bytenr)) {
++		/*
++		 * When we create the reloc root (which is a snapshot of the
++		 * subvolume tree) we set its last_snapshot field (as well as
++		 * for the subvolume's tree root) to the value of the current
++		 * transaction generation minus 1 (at create_reloc_root()).
++		 * This means that at walk_down_reloc_tree() we can catch
++		 * pointers (bytenr/generation pairs) with a generation
++		 * matching the generation of the transaction where we created
++		 * the reloc root, so those pointers correspond to tree blocks
++		 * that were either created before or after the reloc root was
++		 * created. If walk_down_reloc_tree() gave us a path that points
++		 * to a tree block that was created (or COWed) before the reloc
++		 * root was created and in the same transaction where the reloc
++		 * root was created, we have nothing to do and can safely return
++		 * (the tree block is already in both trees).
++		 */
++		if (new_bytenr > 0 && new_bytenr == old_bytenr) {
++			ASSERT(new_ptr_gen == old_ptr_gen);
++			ASSERT(new_ptr_gen ==
++			       btrfs_root_last_snapshot(&src->root_item) + 1);
+ 			ret = level;
+ 			break;
+ 		}
+diff -ruN a/fs/btrfs/transaction.c b/fs/btrfs/transaction.c
+--- a/fs/btrfs/transaction.c	2023-05-09 20:44:21.331953873 +0800
++++ b/fs/btrfs/transaction.c	2023-05-09 20:45:17.602226085 +0800
+@@ -1821,10 +1821,13 @@
+ 	 * To co-operate with that hack, we do hack again.
+ 	 * Or snapshot will be greatly slowed down by a subtree qgroup rescan
+ 	 */
+-	ret = qgroup_account_snapshot(trans, root, parent_root,
+-				      pending->inherit, objectid);
+-	if (ret < 0)
+-		goto fail;
++	/* Don't automatically add a qgroup for read-only snapshots */
++	if (!(root_flags & BTRFS_ROOT_SUBVOL_RDONLY)) {
++		ret = qgroup_account_snapshot(trans, root, parent_root,
++					      pending->inherit, objectid);
++		if (ret < 0)
++			goto fail;
++	}
+ 
+ 	ret = btrfs_insert_dir_item(trans, &fname.disk_name,
+ 				    BTRFS_I(parent_inode), &key, BTRFS_FT_DIR,
++#endif /* SCSI_SPINUP_H */

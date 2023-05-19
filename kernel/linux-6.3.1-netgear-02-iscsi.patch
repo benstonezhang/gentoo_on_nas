@@ -1,0 +1,519 @@
+diff -ruN a/drivers/target/iscsi/iscsi_target_auth.c b/drivers/target/iscsi/iscsi_target_auth.c
+--- a/drivers/target/iscsi/iscsi_target_auth.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/iscsi/iscsi_target_auth.c	2023-05-09 20:45:17.162223956 +0800
+@@ -34,13 +34,34 @@
+ 	}
+ }
+ 
++static int chap_string_to_hex(unsigned char *dst, unsigned char *src, int len)
++{
++	int j = DIV_ROUND_UP(len, 2), rc;
++
++	rc = hex2bin(dst, src, j);
++	if (rc < 0)
++		pr_debug("CHAP string contains non hex digit symbols\n");
++
++	dst[j] = '\0';
++	return j;
++}
++
++static void chap_binaryhex_to_asciihex(char *dst, char *src, int src_len)
++{
++	int i;
++
++	for (i = 0; i < src_len; i++) {
++		sprintf(&dst[i*2], "%02x", (int) src[i] & 0xff);
++	}
++}
++
+ static int chap_gen_challenge(
+ 	struct iscsit_conn *conn,
+ 	int caller,
+ 	char *c_str,
+ 	unsigned int *c_len)
+ {
+-	int ret;
++	int ret, i;
+ 	unsigned char *challenge_asciihex;
+ 	struct iscsi_chap *chap = conn->auth_protocol;
+ 
+@@ -54,7 +75,12 @@
+ 	if (unlikely(ret))
+ 		goto out;
+ 
+-	bin2hex(challenge_asciihex, chap->challenge,
++	/* Fix the challenge string - JASON QIAN, NETGEAR */
++	for (i = 0; i < chap->challenge_len; i++)
++		if (chap->challenge[i] == 0)
++			chap->challenge[i] = 'X';
++
++	chap_binaryhex_to_asciihex(challenge_asciihex, chap->challenge,
+ 				chap->challenge_len);
+ 	/*
+ 	 * Set CHAP_C, and copy the generated challenge into c_str.
+@@ -330,11 +356,13 @@
+ 
+ 	switch (type) {
+ 	case HEX:
++#if 0
+ 		if (strlen(chap_r) != chap->digest_size * 2) {
+ 			pr_err("Malformed CHAP_R\n");
+ 			goto out;
+ 		}
+-		if (hex2bin(client_digest, chap_r, chap->digest_size) < 0) {
++#endif
++		if (chap_string_to_hex(client_digest, chap_r, strlen(chap_r)) < 0) {
+ 			pr_err("Malformed CHAP_R: invalid HEX\n");
+ 			goto out;
+ 		}
+@@ -394,7 +422,7 @@
+ 		goto out;
+ 	}
+ 
+-	bin2hex(response, server_digest, chap->digest_size);
++	chap_binaryhex_to_asciihex(response, server_digest, chap->digest_size);
+ 	pr_debug("[server] %s Server Digest: %s\n",
+ 		chap->digest_name, response);
+ 
+@@ -464,12 +492,13 @@
+ 			pr_err("CHAP_C exceeds maximum binary size of 1024 bytes\n");
+ 			goto out;
+ 		}
+-
++#if 0
+ 		if (hex2bin(initiatorchg_binhex, initiatorchg,
+ 			    initiatorchg_len) < 0) {
+ 			pr_err("Malformed CHAP_C: invalid HEX\n");
+ 			goto out;
+ 		}
++#endif
+ 		break;
+ 	case BASE64:
+ 		initiatorchg_len = chap_base64_decode(initiatorchg_binhex,
+@@ -549,7 +578,7 @@
+ 	/*
+ 	 * Convert response from binary hex to ascii hext.
+ 	 */
+-	bin2hex(response, digest, chap->digest_size);
++	chap_binaryhex_to_asciihex(response, digest, chap->digest_size);
+ 	*nr_out_len += sprintf(nr_out_ptr + *nr_out_len, "CHAP_R=0x%s",
+ 			response);
+ 	*nr_out_len += 1;
+diff -ruN a/drivers/target/iscsi/iscsi_target_login.c b/drivers/target/iscsi/iscsi_target_login.c
+--- a/drivers/target/iscsi/iscsi_target_login.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/iscsi/iscsi_target_login.c	2023-05-09 20:45:17.162223956 +0800
+@@ -758,6 +758,11 @@
+ 	}
+ 
+ 	iscsi_set_session_parameters(sess->sess_ops, conn->param_list, 1);
++
++	/* JASON QIAN @ NETGEAR */
++	if(sess->sess_ops && strstr(sess->sess_ops->InitiatorName, "novell"))
++		conn->stat_sn = 1;
++
+ 	iscsi_release_param_list(conn->param_list);
+ 	conn->param_list = NULL;
+ 
+diff -ruN a/drivers/target/iscsi/iscsi_target_parameters.c b/drivers/target/iscsi/iscsi_target_parameters.c
+--- a/drivers/target/iscsi/iscsi_target_parameters.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/iscsi/iscsi_target_parameters.c	2023-05-09 20:45:17.172224005 +0800
+@@ -811,6 +811,11 @@
+ 	char *tmpptr;
+ 	int value = 0;
+ 
++	if( !param || !param->name || !value_ptr) {
++		printk(KERN_ERR "Bad parameter in iscsi_check_numerical_value.\n");
++		return -1;
++	}
++
+ 	value = simple_strtoul(value_ptr, &tmpptr, 0);
+ 
+ 	if (IS_TYPERANGE_0_TO_2(param)) {
+diff -ruN a/drivers/target/target_core_file.c b/drivers/target/target_core_file.c
+--- a/drivers/target/target_core_file.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_file.c	2023-05-09 20:45:17.162223956 +0800
+@@ -23,12 +23,67 @@
+ #include <linux/scatterlist.h>
+ #include <scsi/scsi_proto.h>
+ #include <asm/unaligned.h>
++#include <net/netlink.h>
++#include <net/net_namespace.h>
+ 
+ #include <target/target_core_base.h>
+ #include <target/target_core_backend.h>
+ 
+ #include "target_core_file.h"
+ 
++#define NETLINK_READYNAS 31
++#define NETLINK_CASTGROUP 1
++
++static struct sock *nls;
++
++static void netlink_null_input(struct sk_buff *skb)
++{
++	return;
++}
++
++static int fd_netlink_event(struct sock *nls, char *device)
++{
++	const u32 group = NETLINK_CASTGROUP;
++	struct nlmsghdr *nlh;
++	struct sk_buff *skb;
++	int ret = 0;
++
++	/* our backstore path lenth
++	 * /volume-name/lun-name/..., 256 should be enough
++	 */
++	int size = 256;
++
++	if (!nls)
++		return -EINVAL;
++
++	if (!netlink_has_listeners(nls, group)) {
++		pr_err("No listener?\n");
++		return -EAGAIN;
++	}
++
++	if (!(skb = nlmsg_new(size, GFP_KERNEL))) {
++		pr_err("%s: alloc_skb failed.\n", __func__);
++		return -ENOMEM;
++	}
++
++	nlh = nlmsg_put(skb, 0, 0, NLMSG_DONE, size, 0);
++	if (!nlh) {
++		kfree_skb(skb);
++		return -ENOMEM;
++	}
++
++	snprintf((char*)nlmsg_data(nlh), size, "%s", device);
++
++	NETLINK_CB(skb).dst_group = group;
++	ret = netlink_broadcast(nls, skb, 0, group, GFP_KERNEL);
++	if (ret) {
++		pr_err("%s: netlink broadcast failed.\n", __func__);
++		return -EAGAIN;
++	}
++
++	return 0;
++}
++
+ static inline struct fd_dev *FD_DEV(struct se_device *dev)
+ {
+ 	return container_of(dev, struct fd_dev, dev);
+@@ -183,7 +238,9 @@
+ 			goto fail;
+ 		}
+ 
+-		fd_dev->fd_block_size = FD_BLOCKSIZE;
++		if (!(fd_dev->fbd_flags & FBDF_HAS_BLOCK_SIZE)
++		    || !fd_dev->fd_block_size)
++			fd_dev->fd_block_size = FD_BLOCKSIZE;
+ 
+ 		/*
+ 		 * Limit WRITE_SAME w/ UNMAP=0 emulation to 8k Number of LBAs (NoLB)
+@@ -309,6 +366,41 @@
+ 	return 0;
+ }
+ 
++/*
++ * Check thin LUN soft threshold
++ * Here use emulate_tpu to check if this is thin LUN
++ * return true if threshold hit
++ */
++static bool tp_exceeded_soft_threshold(struct se_device *dev)
++{
++	struct fd_dev *fd_dev = FD_DEV(dev);
++	struct file *file = fd_dev->fd_file;
++
++	if (unlikely(!fd_dev || !file))
++		return false;
++
++	if ((fd_dev->fbd_flags & FBDF_HAS_THRESHOLD) && dev->dev_attrib.emulate_tpu) {
++		blkcnt_t used_blocks = file->f_inode ? file->f_inode->i_blocks : 0;
++
++		if (used_blocks >= fd_dev->fd_dev_thresh) {
++			if (!(fd_dev->fbd_flags & FDBD_THRESH_REPORTED)) {
++				fd_dev->fbd_flags |= FDBD_THRESH_REPORTED;
++				pr_warn("FILEIO: Thin LUN %s used blocks exceeded [%llu]\n",
++						fd_dev->fd_dev_name, fd_dev->fd_dev_thresh);
++				if (fd_netlink_event(nls, fd_dev->fd_dev_name))
++					 pr_err("FILEIO: LUN %s sent event fail.\n",
++							fd_dev->fd_dev_name);
++				return true;
++			}
++		} else if (fd_dev->fbd_flags & FDBD_THRESH_REPORTED) {
++			/* if space freed, reset reported=0 */
++			fd_dev->fbd_flags &= ~FDBD_THRESH_REPORTED;
++		}
++	}
++
++	return false;
++}
++
+ static int fd_do_rw(struct se_cmd *cmd, struct file *fd,
+ 		    u32 block_size, struct scatterlist *sgl,
+ 		    u32 sgl_nents, u32 data_length, int is_write)
+@@ -628,6 +720,9 @@
+ 				return rc;
+ 		}
+ 
++		if (tp_exceeded_soft_threshold(dev))
++			return TCM_TP_SOFT_THRESHOLD_EXCEEDED;
++
+ 		ret = fd_do_rw(cmd, file, dev->dev_attrib.block_size,
+ 			       sgl, sgl_nents, cmd->data_length, 1);
+ 		/*
+@@ -689,7 +784,7 @@
+ 
+ enum {
+ 	Opt_fd_dev_name, Opt_fd_dev_size, Opt_fd_buffered_io,
+-	Opt_fd_async_io, Opt_err
++	Opt_fd_async_io, Opt_fd_dev_thresh, Opt_fd_block_size, Opt_err
+ };
+ 
+ static match_table_t tokens = {
+@@ -697,6 +792,8 @@
+ 	{Opt_fd_dev_size, "fd_dev_size=%s"},
+ 	{Opt_fd_buffered_io, "fd_buffered_io=%d"},
+ 	{Opt_fd_async_io, "fd_async_io=%d"},
++	{Opt_fd_dev_thresh, "fd_dev_thresh=%s"},
++	{Opt_fd_block_size, "fd_block_size=%d"},
+ 	{Opt_err, NULL}
+ };
+ 
+@@ -712,6 +809,7 @@
+ 	if (!opts)
+ 		return -ENOMEM;
+ 
++	fd_dev->fbd_flags |= FDBD_HAS_BUFFERED_IO_WCE;
+ 	orig = opts;
+ 
+ 	while ((ptr = strsep(&opts, ",\n")) != NULL) {
+@@ -751,6 +849,10 @@
+ 			ret = match_int(args, &arg);
+ 			if (ret)
+ 				goto out;
++			if (arg == 0) {
++				fd_dev->fbd_flags &= ~FDBD_HAS_BUFFERED_IO_WCE;
++				break;
++			}
+ 			if (arg != 1) {
+ 				pr_err("bogus fd_buffered_io=%d value\n", arg);
+ 				ret = -EINVAL;
+@@ -777,6 +879,62 @@
+ 
+ 			fd_dev->fbd_flags |= FDBD_HAS_ASYNC_IO;
+ 			break;
++		case Opt_fd_dev_thresh:
++			arg_p = match_strdup(&args[0]);
++			if (!arg_p) {
++				ret = -ENOMEM;
++				break;
++			}
++			ptr = strchr(arg_p, '%');
++			if (ptr)
++			{
++				u64 blocks = div_u64(fd_dev->fd_dev_size, 512);
++				u8 pct;
++				*ptr = '\0';
++				ret = kstrtou8(arg_p, 10, &pct);
++				kfree(arg_p);
++				if (ret < 0 || pct > 100)
++				{
++					pr_err("invalid percentage for"
++							" fd_dev_thresh=\n");
++					goto out;
++				}
++				fd_dev->fd_dev_thresh = div_u64(blocks * pct, 100);
++			}
++			else
++			{
++				ret = kstrtoull(arg_p, 0, &fd_dev->fd_dev_thresh);
++				kfree(arg_p);
++				if (ret < 0) {
++					pr_err("kstrtoull() failed for"
++							" fd_dev_thresh=\n");
++					goto out;
++				}
++			}
++			pr_debug("FILEIO: Threshold Size: %llu"
++					" blocks\n", fd_dev->fd_dev_thresh);
++			if (fd_dev->fd_dev_thresh)
++				fd_dev->fbd_flags |= FBDF_HAS_THRESHOLD;
++			else
++				fd_dev->fbd_flags &= ~FBDF_HAS_THRESHOLD;
++			break;
++		case Opt_fd_block_size:
++			arg_p = match_strdup(&args[0]);
++			if (!arg_p) {
++				ret = -ENOMEM;
++				break;
++			}
++			ret = kstrtou32(arg_p, 0, &fd_dev->fd_block_size);
++			kfree(arg_p);
++			if (ret < 0) {
++				pr_err("kstrtou32() failed for"
++						" fd_block_size\n");
++				goto out;
++			}
++			pr_debug("FILEIO: Referencing Block Size: %u bytes\n",
++				 fd_dev->fd_block_size);
++			fd_dev->fbd_flags |= FBDF_HAS_BLOCK_SIZE;
++			break;
+ 		default:
+ 			break;
+ 		}
+@@ -791,10 +949,11 @@
+ {
+ 	struct fd_dev *fd_dev = FD_DEV(dev);
+ 	ssize_t bl = 0;
++	unsigned long long blocks = fd_dev->fd_file ? (fd_dev->fd_file->f_inode ? fd_dev->fd_file->f_inode->i_blocks : 0): 0;
+ 
+ 	bl = sprintf(b + bl, "TCM FILEIO ID: %u", fd_dev->fd_dev_id);
+-	bl += sprintf(b + bl, "        File: %s  Size: %llu  Mode: %s Async: %d\n",
+-		fd_dev->fd_dev_name, fd_dev->fd_dev_size,
++	bl += sprintf(b + bl, "        File: %s  Size: %llu  Blocks: %llu/%llu  Mode: %s Async: %d\n",
++		fd_dev->fd_dev_name, fd_dev->fd_dev_size, blocks, fd_dev->fd_dev_thresh,
+ 		(fd_dev->fbd_flags & FDBD_HAS_BUFFERED_IO_WCE) ?
+ 		"Buffered-WCE" : "O_DSYNC",
+ 		!!(fd_dev->fbd_flags & FDBD_HAS_ASYNC_IO));
+@@ -934,11 +1093,21 @@
+ 
+ static int __init fileio_module_init(void)
+ {
++	struct netlink_kernel_cfg cfg = {
++		.input	= netlink_null_input,
++	};
++	nls = netlink_kernel_create(&init_net, NETLINK_READYNAS, &cfg);
++	if (!nls)
++		pr_err("FILEIO: Error create netlink!\n");
++
+ 	return transport_backend_register(&fileio_ops);
+ }
+ 
+ static void __exit fileio_module_exit(void)
+ {
++	if (nls)
++		netlink_kernel_release(nls);
++
+ 	target_backend_unregister(&fileio_ops);
+ }
+ 
+diff -ruN a/drivers/target/target_core_file.h b/drivers/target/target_core_file.h
+--- a/drivers/target/target_core_file.h	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_file.h	2023-05-09 20:45:17.162223956 +0800
+@@ -23,6 +23,9 @@
+ #define FBDF_HAS_SIZE		0x02
+ #define FDBD_HAS_BUFFERED_IO_WCE 0x04
+ #define FDBD_HAS_ASYNC_IO	 0x08
++#define FBDF_HAS_THRESHOLD	0x10
++#define FDBD_THRESH_REPORTED	0x100
++#define FBDF_HAS_BLOCK_SIZE	0x200
+ #define FDBD_FORMAT_UNIT_SIZE	2048
+ 
+ struct fd_dev {
+@@ -37,6 +40,7 @@
+ 	u32		fd_queue_depth;
+ 	u32		fd_block_size;
+ 	unsigned long long fd_dev_size;
++	unsigned long long fd_dev_thresh;
+ 	struct file	*fd_file;
+ 	struct file	*fd_prot_file;
+ 	/* FILEIO HBA device is connected to */
+diff -ruN a/drivers/target/target_core_pr.c b/drivers/target/target_core_pr.c
+--- a/drivers/target/target_core_pr.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_pr.c	2023-05-09 20:45:17.162223956 +0800
+@@ -3730,6 +3730,8 @@
+ 		 * LENGTH field are not altered based on the allocation length
+ 		 */
+ 		add_len += 8;
++		if (add_len > (cmd->data_length - 8))
++			break;
+ 	}
+ 	spin_unlock(&dev->t10_pr.registration_lock);
+ 
+diff -ruN a/drivers/target/target_core_sbc.c b/drivers/target/target_core_sbc.c
+--- a/drivers/target/target_core_sbc.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_sbc.c	2023-05-09 20:45:17.162223956 +0800
+@@ -753,10 +753,10 @@
+ 	}
+ 	if (cdb[1] & 0x8) {
+ 		if (!target_check_fua(dev)) {
+-			pr_err("Got CDB: 0x%02x with FUA bit set, but device"
++			pr_err_once("Got CDB: 0x%02x with FUA bit set, but device"
+ 			       " does not advertise support for FUA write\n",
+ 			       cdb[0]);
+-			return -EINVAL;
++			return 0;
+ 		}
+ 		cmd->se_cmd_flags |= SCF_FUA;
+ 	}
+diff -ruN a/drivers/target/target_core_spc.c b/drivers/target/target_core_spc.c
+--- a/drivers/target/target_core_spc.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_spc.c	2023-05-09 20:45:17.162223956 +0800
+@@ -148,6 +148,10 @@
+ 
+ 	buf[4] = 91; /* Set additional length to 91 */
+ 
++	/* These next two are necessary for MS initiators */
++	buf[58] = 0x09;
++	buf[59] = 0x60;
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(spc_emulate_inquiry_std);
+@@ -1088,7 +1092,7 @@
+ 			length += 1;
+ 	}
+ 
+-	if (page == 0x3f) {
++	if (page == 0x3f || page == 0x00) {
+ 		if (subpage != 0x00 && subpage != 0xff) {
+ 			pr_warn("MODE_SENSE: Invalid subpage code: 0x%02x\n", subpage);
+ 			return TCM_INVALID_CDB_FIELD;
+@@ -2301,6 +2305,10 @@
+ 		break;
+ 	case INQUIRY:
+ 		*size = get_unaligned_be16(&cdb[3]);
++		/* Correct the wrong data length from VMWare ESXi 5.0
++		   - JASON QIAN @ NETGEAR */
++		if (cmd->data_length > *size)
++			cmd->data_length = *size;
+ 
+ 		/*
+ 		 * Do implicit HEAD_OF_QUEUE processing for INQUIRY.
+diff -ruN a/drivers/target/target_core_transport.c b/drivers/target/target_core_transport.c
+--- a/drivers/target/target_core_transport.c	2023-05-09 20:44:20.951952035 +0800
++++ b/drivers/target/target_core_transport.c	2023-05-09 20:45:17.162223956 +0800
+@@ -2041,6 +2041,7 @@
+ 	case TCM_ALUA_TG_PT_UNAVAILABLE:
+ 	case TCM_ALUA_STATE_TRANSITION:
+ 	case TCM_ALUA_OFFLINE:
++	case TCM_TP_SOFT_THRESHOLD_EXCEEDED:
+ 		break;
+ 	case TCM_OUT_OF_RESOURCES:
+ 		cmd->scsi_status = SAM_STAT_TASK_SET_FULL;
+@@ -3417,6 +3418,12 @@
+ 		.asc = 0x04,
+ 		.ascq = ASCQ_04H_ALUA_OFFLINE,
+ 	},
++	[TCM_TP_SOFT_THRESHOLD_EXCEEDED] = {
++		/* Thin Provisioning LUN soft threshold exceeded */
++		.key = UNIT_ATTENTION,
++		.asc = 0x38,
++		.ascq = 0x07,
++	},
+ };
+ 
+ /**
+diff -ruN a/include/target/target_core_base.h b/include/target/target_core_base.h
+--- a/include/target/target_core_base.h	2023-05-09 20:44:22.031957259 +0800
++++ b/include/target/target_core_base.h	2023-05-09 20:45:18.522230536 +0800
+@@ -194,6 +194,7 @@
+ 	TCM_ALUA_TG_PT_UNAVAILABLE		= R(0x21),
+ 	TCM_ALUA_STATE_TRANSITION		= R(0x22),
+ 	TCM_ALUA_OFFLINE			= R(0x23),
++	TCM_TP_SOFT_THRESHOLD_EXCEEDED		= R(0x24),
+ #undef R
+ };
+ 
