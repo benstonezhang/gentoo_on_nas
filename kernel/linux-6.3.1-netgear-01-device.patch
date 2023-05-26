@@ -3670,7 +3670,7 @@ diff -ruN a/drivers/i2c/busses/i2c-nct6775.c b/drivers/i2c/busses/i2c-nct6775.c
 +		switch (size) {
 +		case I2C_SMBUS_BYTE_DATA:
 +			outb(data->byte, NCT6775_REG(priv, DATA));
-+			break
++			break;
 +		case I2C_SMBUS_BYTE:
 +			break;
 +		case I2C_SMBUS_WORD_DATA:
