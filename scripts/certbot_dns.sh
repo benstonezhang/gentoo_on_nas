@@ -2,8 +2,8 @@
 
 set -e
 
-# default remain time is 10 days
-CERT_REMAIN_TIME=864000
+# default remain time is 15 days
+CERT_REMAIN_TIME=${CERT_REMAIN_TIME:-1296000}
 
 NS_INFO=nsinfo
 if [ ! -e $NS_INFO ]; then
@@ -12,8 +12,6 @@ if [ ! -e $NS_INFO ]; then
 fi
 read -r NS_SERVER NS_TSIG_NAME NS_TSIG_DATA <$NS_INFO
 NS_KEY="$NS_TSIG_NAME $NS_TSIG_DATA"
-echo "NameServer: $NS_SERVER"
-#echo "TSIG:       $NS_KEY"
 
 NEW_ACCOUNT_ID=create
 ACCOUNT_ID="$(ls -1 | sed '/^[0-9]\+\.key$/{s/\.key//; p}; d')"
@@ -23,7 +21,7 @@ fi
 
 DOMAIN="$(ls -1 | sed '/.*\..*\.key/{s/\.key//; p}; d')"
 if [ -z "$DOMAIN" ]; then
-	DOMAIN=$1
+	DOMAIN="$1"
 	if [ -z "$DOMAIN" ]; then
 		echo "Usage: $0 domain [alt_domain ...]"
 		echo "Environments: CERT_RENEW"
@@ -40,23 +38,27 @@ if [ -e "${DOMAIN}.crt" ]; then
 	fi
 fi
 
-DOMAINS=$@
+DOMAINS=("$@")
 if [ ${#DOMAINS[@]} -lt 2 ]; then
-	DOMAINS=($DOMAIN)
+	DOMAINS=("$DOMAIN" "*.$DOMAIN")
 fi
-echo "Primary domain: ${DOMAIN}"
-echo "Subject Alternative Names: ${DOMAINS[@]}"
+SUBJALTNAME="DNS:${DOMAINS[0]}"
+for (( i=1; i < ${#DOMAINS[@]}; i++ )); do
+	SUBJALTNAME="${SUBJALTNAME},DNS:${DOMAINS[$i]}"
+done
 
-ZONE_ID_LIST=${ZONE_ID_LIST:-zone_id.lst}
+echo "Primary domain: ${DOMAIN}"
+echo "Subject Alternative Names: ${SUBJALTNAME}"
+echo "NameServer: $NS_SERVER"
+#echo "TSIG:       $NS_KEY"
 
 # ACME API to use
-API="https://acme-v02.api.letsencrypt.org"
+API='https://acme-v02.api.letsencrypt.org'
 
 # Staging API for test
-API="https://acme-staging-v02.api.letsencrypt.org"
+#API='https://acme-staging-v02.api.letsencrypt.org'
 
-HEADER_CONTENT_TYPE_ACME="Content-Type: application/jose+json"
-HEADER_CONTENT_TYPE_JSON="Content-Type: application/json"
+HEADER_CONTENT_TYPE_ACME='Content-Type: application/jose+json'
 DNS_ACME_CHALLENGE='_acme-challenge'
 
 
@@ -73,7 +75,7 @@ function hexbin() {
 
 # remove newlines and duplicate whitespace
 function flatstring() {
-	tr -d '\n\r' | sed 's/[[:space:]]\+/ /g'
+	tr -d '\r\n' | sed 's/[[:space:]]\+/ /g'
 }
 
 # make and ACME API request
@@ -99,8 +101,8 @@ function api_request() {
 	#echo "JWS Body: ${BODY}" >&2
 	# base64 encoding/decoding necessary to stay binary safe.
 	# e.g. the new-cert operation responds with a der encoded certificate.
-	local RESPONSE="$(echo -n "data-raw = \"$(echo ${JWS} | sed 's|"|\\"|g')\"" | \
-			curl -sSi -X POST -H "$HEADER_CONTENT_TYPE_ACME" -K - "${URL}" | base64 -w 0 | base64 -d)"
+	local RESPONSE="$(echo -n "data-raw = \"$(echo "${JWS}" | sed 's|"|\\"|g')\"" | \
+			curl -sSi -X POST -H "${HEADER_CONTENT_TYPE_ACME}" -K - "${URL}" | base64 -w 0 | base64 -d)"
 	#echo "${RESPONSE}" >&2
 	# just in case we get a 2xx status code but an echo in response body (spec is not clear on that)
 	local ACME_ERROR_CHECK="$(echo -n "${RESPONSE}" | flatstring | sed 's/^.*"type": "urn:acme:error.*$/ERROR/')"
@@ -120,21 +122,20 @@ function api_request() {
 
 function dynv6_update() {
 	nsupdate <<EOF
-server $NS_SERVER
+server ${NS_SERVER}
 zone $1
-update delete $DNS_ACME_CHALLENGE.$1 TXT
-update add $DNS_ACME_CHALLENGE.$1 60 TXT $2
-key $NS_KEY
+update add ${DNS_ACME_CHALLENGE}.$1 60 TXT $2
+key ${NS_KEY}
 send
 EOF
 }
 
 function dynv6_delete() {
 	nsupdate <<EOF
-server $NS_SERVER
+server ${NS_SERVER}
 zone $1
-update delete $DNS_ACME_CHALLENGE.$1 TXT
-key $NS_KEY
+update delete ${DNS_ACME_CHALLENGE}.$1 TXT
+key ${NS_KEY}
 send
 EOF
 }
@@ -142,7 +143,7 @@ EOF
 function check_dns_txt() {
 	local count=0
 	while [ $count -lt 20 ]; do
-		dig "${DNS_ACME_CHALLENGE}.${1}" TXT | grep -E "^${DNS_ACME_CHALLENGE}.${1}.\s+[0-9]*\s+IN\s+TXT" && return
+		dig "@${NS_SERVER}" "${DNS_ACME_CHALLENGE}.${1}" TXT | grep -E "^${DNS_ACME_CHALLENGE}.${1}.\s+[0-9]*\s+IN\s+TXT" && return
 		sleep 3
 		count=$((count+1))
 	done
@@ -152,8 +153,11 @@ function check_dns_txt() {
 
 function on_exit() {
 	echo "Delete validation TXT record"
-	for domain in ${DOMAINS[@]}; do
-		dynv6_delete "$domain"
+	for domain in "${DOMAINS[@]}"; do
+		while true; do
+			dynv6_delete "$domain" && break
+			sleep 3
+		done
 	done
 }
 
@@ -176,10 +180,10 @@ fi
 # formatting: Exponent dec => hex => binary => base64url
 # e.g. 65537 => 0x010001 => ... => AQAB
 # printf 0.32 and cutting 00 in pairs makes sure we have even number of digits for hexbin
-JWK_E="$(openssl rsa -pubin -in ${ACCOUNT_ID}.pub -text -noout | grep ^Exponent | awk '{ printf "%0.32x",$2; }' | sed 's/^\(00\)*//g' | hexbin | base64url)"
+JWK_E="$(openssl rsa -pubin -in "${ACCOUNT_ID}.pub" -text -noout | grep ^Exponent | awk '{ printf "%0.32x",$2; }' | sed 's/^\(00\)*//g' | hexbin | base64url)"
 
 # account public key modulus
-JWK_N="$(openssl rsa -pubin -in ${ACCOUNT_ID}.pub -modulus -noout | sed 's/^Modulus=//' | hexbin | base64url)"
+JWK_N="$(openssl rsa -pubin -in "${ACCOUNT_ID}.pub" -modulus -noout | sed 's/^Modulus=//' | hexbin | base64url)"
 
 # Important: no whitespaces at all. The server computes the thumbprint from our
 # E and N values in JWK and does so with this exact JSON. The sha256 from us
@@ -261,12 +265,17 @@ trap on_exit EXIT
 
 echo "Doing DNS validation"
 for (( i=0; i < ${#DOMAINS[@]}; i++ )); do
-	domain=${DOMAINS[$i]}
-	dynv6_update "${domain}" "${KEYAUTHS[$i]}"
+	domain="$(echo ${DOMAINS[$i]} | sed 's/^*\.//')"
+	while true; do
+		dynv6_update "${domain}" "${KEYAUTHS[$i]}" && break
+		sleep 3
+	done
 done
 sleep 15
 for (( i=0; i < ${#DOMAINS[@]}; i++ )); do
-	check_dns_txt "${DOMAINS[$i]}"
+	domain=${DOMAINS[$i]}
+	echo "$domain" | grep '^*\.' && continue
+	check_dns_txt "${domain}"
 done
 
 
@@ -301,11 +310,6 @@ sleep 10
 
 
 echo "Creating CSR ..."
-SUBJALTNAME="DNS:${DOMAINS[0]}"
-for (( i=1; i < ${#DOMAINS[@]}; i++ )); do
-	SUBJALTNAME="${SUBJALTNAME},DNS:${DOMAINS[$i]}"
-done
-echo "subjectAltName=${SUBJALTNAME}"
 openssl req -new -sha256 -key "${DOMAIN}.key" -subj "/CN=${DOMAIN}" -addext "subjectAltName=${SUBJALTNAME}" -out "${DOMAIN}.csr"
 echo "Done ${DOMAIN}.csr"
 
@@ -340,6 +344,7 @@ echo "Downloading certificate ..."
 echo "${CERTIFICATE_URL}"
 RESPONSE="$(api_request "${CERTIFICATE_URL}" "")"
 # Response contains the server and intermediate certificate(s). Store all in one chained file. They are in the right order already.
+rm -f "${DOMAIN}.crt"
 echo "${RESPONSE}" | awk '/-----BEGIN CERTIFICATE-----/,0' > "${DOMAIN}.crt"
 chmod 444 "${DOMAIN}.crt"
 echo "Success! Certificate with intermediates saved to: ${DOMAIN}.crt"

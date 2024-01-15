@@ -3,7 +3,8 @@
 set -e
 
 # default remain time is 10 days
-CERT_REMAIN_TIME=864000
+CERT_REMAIN_TIME=${CERT_REMAIN_TIME:-1296000}
+NS_SERVER=ns1.dynv6.com
 
 DYNV6_TOKEN_FILE=dynv6.token
 if [ ! -e $DYNV6_TOKEN_FILE ]; then
@@ -20,7 +21,7 @@ fi
 
 DOMAIN="$(ls -1 | sed '/.*\..*\.key/{s/\.key//; p}; d')"
 if [ -z "$DOMAIN" ]; then
-	DOMAIN=$1
+	DOMAIN="$1"
 	if [ -z "$DOMAIN" ]; then
 		echo "Usage: $0 domain [alt_domain ...]"
 		echo "Environments: CERT_RENEW"
@@ -37,23 +38,28 @@ if [ -e "${DOMAIN}.crt" ]; then
 	fi
 fi
 
-DOMAINS=$@
+DOMAINS=("$@")
 if [ ${#DOMAINS[@]} -lt 2 ]; then
-	DOMAINS=($DOMAIN)
+	DOMAINS=("$DOMAIN" "*.$DOMAIN")
 fi
+SUBJALTNAME="DNS:${DOMAINS[0]}"
+for (( i=1; i < ${#DOMAINS[@]}; i++ )); do
+	SUBJALTNAME="${SUBJALTNAME},DNS:${DOMAINS[$i]}"
+done
+
 echo "Primary domain: ${DOMAIN}"
-echo "Subject Alternative Names: ${DOMAINS[@]}"
+echo "Subject Alternative Names: ${SUBJALTNAME}"
 
 ZONE_ID_LIST=${ZONE_ID_LIST:-zone_id.lst}
 
 # ACME API to use
-API="https://acme-v02.api.letsencrypt.org"
+API='https://acme-v02.api.letsencrypt.org'
 
 # Staging API for test
-#API="https://acme-staging-v02.api.letsencrypt.org"
+#API='https://acme-staging-v02.api.letsencrypt.org'
 
-HEADER_CONTENT_TYPE_ACME="Content-Type: application/jose+json"
-HEADER_CONTENT_TYPE_JSON="Content-Type: application/json"
+HEADER_CONTENT_TYPE_ACME='Content-Type: application/jose+json'
+HEADER_CONTENT_TYPE_JSON='Content-Type: application/json'
 DNS_ACME_CHALLENGE='_acme-challenge'
 
 dynv6_records=''
@@ -119,24 +125,24 @@ function api_request() {
 
 function dynv6_get_zoneid() {
 	if [ -e "${ZONE_ID_LIST}" ]; then
-		zone_id=$(sed "/^$1 /{s/^.* //; p}; d" "${ZONE_ID_LIST}")
+		zone_id="$(sed "/^$1 /{s/^.* //; p}; d" "${ZONE_ID_LIST}")"
 		if [ -n "$zone_id" ]; then
 			echo -n "$zone_id"
 			return
 		fi
 	fi
-	local zone_id=$(echo -n "-H \"${DYNV6_AUTH}\"" | \
+	local zone_id="$(echo -n "-H \"${DYNV6_AUTH}\"" | \
 			curl -sS -X GET -H "$HEADER_CONTENT_TYPE_JSON" -K - "https://dynv6.com/api/v2/zones" | \
-			sed -E '/"name":"'"${1}"'"/{s/^.*"name":"'"${1}"'"[^}]*,"id":([0-9]+)[^0-9].*$/\1/; q}; d')
+			sed -E '/"name":"'"${1}"'"/{s/^.*"name":"'"${1}"'"[^}]*,"id":([0-9]+)[^0-9].*$/\1/; q}; d')"
 	echo -n "$1 ${zone_id}" >> "${ZONE_ID_LIST}"
-	echo -n ${zone_id}
+	echo -n "${zone_id}"
 }
 
 function dynv6_update() {
-	local zone_id=$(dynv6_get_zoneid "$1")
-	local RESPONSE=$(echo -en "-H \"${DYNV6_AUTH}\"\ndata-raw = \"{\\\"name\\\":\\\"${DNS_ACME_CHALLENGE}\\\",\\\"data\\\":\\\"${2}\\\",\\\"type\\\":\\\"TXT\\\"}\"" | \
-			curl -sS -X POST -H "$HEADER_CONTENT_TYPE_JSON" -K - "https://dynv6.com/api/v2/zones/${zone_id}/records")
-	local record_id=$(echo -n ${RESPONSE} | sed 's/^.*"id"://; s/,.*$//')
+	local zone_id="$(dynv6_get_zoneid "$1")"
+	local RESPONSE="$(echo -en "-H \"${DYNV6_AUTH}\"\ndata-raw = \"{\\\"name\\\":\\\"${DNS_ACME_CHALLENGE}\\\",\\\"data\\\":\\\"${2}\\\",\\\"type\\\":\\\"TXT\\\"}\"" | \
+			curl -sS -X POST -H "$HEADER_CONTENT_TYPE_JSON" -K - "https://dynv6.com/api/v2/zones/${zone_id}/records")"
+	local record_id="$(echo -n ${RESPONSE} | sed 's/^.*"id"://; s/,.*$//')"
 	dynv6_records="${dynv6_records} $zone_id $record_id"
 }
 
@@ -147,7 +153,7 @@ function dynv6_delete() {
 function check_dns_txt() {
 	local count=0
 	while [ $count -lt 20 ]; do
-		dig "${DNS_ACME_CHALLENGE}.${1}" TXT | grep -E "^${DNS_ACME_CHALLENGE}.${1}.\s+[0-9]*\s+IN\s+TXT" && return
+		dig "@${NS_SERVER}" "${DNS_ACME_CHALLENGE}.${1}" TXT | grep -E "^${DNS_ACME_CHALLENGE}.${1}.\s+[0-9]+\s+IN\s+TXT" && return
 		sleep 3
 		count=$((count+1))
 	done
@@ -184,10 +190,10 @@ fi
 # formatting: Exponent dec => hex => binary => base64url
 # e.g. 65537 => 0x010001 => ... => AQAB
 # printf 0.32 and cutting 00 in pairs makes sure we have even number of digits for hexbin
-JWK_E="$(openssl rsa -pubin -in ${ACCOUNT_ID}.pub -text -noout | grep ^Exponent | awk '{ printf "%0.32x",$2; }' | sed 's/^\(00\)*//g' | hexbin | base64url)"
+JWK_E="$(openssl rsa -pubin -in "${ACCOUNT_ID}.pub" -text -noout | grep ^Exponent | awk '{ printf "%0.32x",$2; }' | sed 's/^\(00\)*//g' | hexbin | base64url)"
 
 # account public key modulus
-JWK_N="$(openssl rsa -pubin -in ${ACCOUNT_ID}.pub -modulus -noout | sed 's/^Modulus=//' | hexbin | base64url)"
+JWK_N="$(openssl rsa -pubin -in "${ACCOUNT_ID}.pub" -modulus -noout | sed 's/^Modulus=//' | hexbin | base64url)"
 
 # Important: no whitespaces at all. The server computes the thumbprint from our
 # E and N values in JWK and does so with this exact JSON. The sha256 from us
@@ -205,9 +211,9 @@ else
 	JWS_AUTH="\"jwk\": { \"e\": \"${JWK_E}\", \"kty\": \"RSA\", \"n\": \"${JWK_N}\" }"
 
 	echo "Registering account ..."
-	RESPONSE=$(api_request "${API}/acme/new-acct" "{ \"termsOfServiceAgreed\": true }")
-	ACCOUNT_URL=$(echo -n "${RESPONSE}" | grep -i '^location: ' | sed 's/^location: //i' | flatstring)
-	ACCOUNT_ID=$(echo "$ACCOUNT_URL" | sed 's|^.*/||')
+	RESPONSE="$(api_request "${API}/acme/new-acct" "{ \"termsOfServiceAgreed\": true }")"
+	ACCOUNT_URL="$(echo -n "${RESPONSE}" | grep -i '^location: ' | sed 's/^location: //i' | flatstring)"
+	ACCOUNT_ID="$(echo "$ACCOUNT_URL" | sed 's|^.*/||')"
 	mv "${NEW_ACCOUNT_ID}.key" "${ACCOUNT_ID}.key"
 	mv "${NEW_ACCOUNT_ID}.pub" "${ACCOUNT_ID}.pub"
 	if [ -z "${NO_KEY_PASS}" ]; then
@@ -269,12 +275,14 @@ trap on_exit EXIT
 
 echo "Doing DNS validation"
 for (( i=0; i < ${#DOMAINS[@]}; i++ )); do
-	domain=${DOMAINS[$i]}
+	domain="$(echo "${DOMAINS[$i]}" | sed 's/^*\.//')"
 	dynv6_update "${domain}" "${KEYAUTHS[$i]}"
 done
 sleep 15
 for (( i=0; i < ${#DOMAINS[@]}; i++ )); do
-	check_dns_txt "${DOMAINS[$i]}"
+	domain="${DOMAINS[$i]}"
+	echo "${domain}" | grep '^*\.' > /dev/null && continue
+	check_dns_txt "${domain}"
 done
 
 
@@ -285,6 +293,7 @@ for (( i=0; i < ${#CHALLENGE_URLS[@]}; i++ )); do
 	STATUS="$(echo -n "$RESPONSE" | flatstring | sed 's/^.*"status"\:\ "\([^"]*\)".*$/\1/')"
 	if [ "${STATUS}" != "valid" ]; then
 		echo "Failed to responding to challenge"
+		echo "$RESPONSE"
 		exit 1
 	fi
 done
@@ -309,11 +318,6 @@ sleep 10
 
 
 echo "Creating CSR ..."
-SUBJALTNAME="DNS:${DOMAINS[0]}"
-for (( i=1; i < ${#DOMAINS[@]}; i++ )); do
-	SUBJALTNAME="${SUBJALTNAME},DNS:${DOMAINS[$i]}"
-done
-echo "subjectAltName=${SUBJALTNAME}"
 openssl req -new -sha256 -key "${DOMAIN}.key" -subj "/CN=${DOMAIN}" -addext "subjectAltName=${SUBJALTNAME}" -out "${DOMAIN}.csr"
 echo "Done ${DOMAIN}.csr"
 
@@ -335,7 +339,11 @@ case "${STATUS}" in
 		;;
 	403)
 		RESPONSE="$(api_request "${ORDER_URL}" "")"
-		CERTIFICATE_URL="$(echo -n "$RESPONSE" | flatstring | sed 's/^.*"certificate"\:\ "\([^"]*\)".*$/\1/')"
+		CERTIFICATE_URL="$(echo -n "$RESPONSE" | flatstring | grep certificate | sed 's/^.*"certificate"\:\ "\([^"]*\)".*$/\1/')"
+		if [ -z "$CERTIFICATE_URL" ]; then
+			echo "Certificate order status wrong ($STATUS). Cannot continue."
+			exit 1
+		fi
 		;;
 	*)
 		echo "${RESPONSE}"
@@ -348,6 +356,7 @@ echo "Downloading certificate ..."
 echo "${CERTIFICATE_URL}"
 RESPONSE="$(api_request "${CERTIFICATE_URL}" "")"
 # Response contains the server and intermediate certificate(s). Store all in one chained file. They are in the right order already.
+rm -f "${DOMAIN}.crt"
 echo "${RESPONSE}" | awk '/-----BEGIN CERTIFICATE-----/,0' > "${DOMAIN}.crt"
 chmod 444 "${DOMAIN}.crt"
 echo "Success! Certificate with intermediates saved to: ${DOMAIN}.crt"
