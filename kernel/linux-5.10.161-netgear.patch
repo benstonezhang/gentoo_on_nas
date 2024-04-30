@@ -3664,7 +3664,7 @@ diff -ruN a/drivers/hwmon/w83627ehf.c b/drivers/hwmon/w83627ehf.c
 +
 +	mutex_lock(&data->update_lock);
 +	data->target_temp[nr] = val;
-+	w83627ehf_write_value(data, data->REG_TARGET[nr], val);
++	w83627ehf_write_value(data, W83627EHF_REG_TARGET[nr], val);
 +
 +	reg = w83627ehf_read_value(data, W83627EHF_REG_TOLERANCE[nr]);
 +	if (nr == 1)
