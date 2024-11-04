@@ -1,0 +1,16 @@
+--- a/configure	2021-08-21 08:32:15.000000000 -0000
++++ b/configure	2023-06-01 13:23:47.279202881 -0000
+@@ -14128,12 +14128,7 @@
+ 
+ 
+ # Check whether --enable-websocket was given.
+-if test ${enable_websocket+y}
+-then :
+-  enableval=$enable_websocket; enable_websocket_requested=$enableval enable_websocket=$enableval
+-else $as_nop
+-  enable_websocket=yes
+-fi
++enable_websocket=yes
+ 
+ 
+ # Check whether --enable-epoll was given.

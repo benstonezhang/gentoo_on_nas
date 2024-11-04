@@ -1,0 +1,68 @@
+diff --git a/src/BtHandshakeMessage.cc b/src/BtHandshakeMessage.cc
+index 7f5102d8..6f1216d6 100644
+--- a/src/BtHandshakeMessage.cc
++++ b/src/BtHandshakeMessage.cc
+@@ -33,6 +33,7 @@
+  */
+ /* copyright --> */
+ #include "BtHandshakeMessage.h"
++#include "LogFactory.h"
+ 
+ #include <cstring>
+ 
+@@ -81,6 +82,18 @@ BtHandshakeMessage::create(const unsigned char* data, size_t dataLength)
+   return msg;
+ }
+ 
++bool BtHandshakeMessage::isMalicious(const unsigned char* data, size_t dataLength)
++{
++  if ((memcmp((const char *)data + 48, "-DT0", 4) == 0) ||
++      (memcmp((const char *)data + 48, "-GT0", 4) == 0) ||
++      (memcmp((const char *)data + 48, "-XL0", 4) == 0)) {
++    A2_LOG_NOTICE(fmt("Handshake peer is malicious client, peerid=%s",
++                      util::percentEncode(data + 48, PEER_ID_LENGTH).c_str()));
++    return true;
++  }
++  return false;
++}
++
+ std::vector<unsigned char> BtHandshakeMessage::createMessage()
+ {
+   auto msg = std::vector<unsigned char>(MESSAGE_LENGTH);
+diff --git a/src/BtHandshakeMessage.h b/src/BtHandshakeMessage.h
+index 3aeeaf11..6634f924 100644
+--- a/src/BtHandshakeMessage.h
++++ b/src/BtHandshakeMessage.h
+@@ -71,6 +71,8 @@ public:
+   static std::unique_ptr<BtHandshakeMessage> create(const unsigned char* data,
+                                                     size_t dataLength);
+ 
++  static bool isMalicious(const unsigned char* data, size_t dataLength);
++
+   virtual ~BtHandshakeMessage();
+ 
+   static const uint8_t ID = INT8_MAX;
+diff --git a/src/DefaultBtMessageReceiver.cc b/src/DefaultBtMessageReceiver.cc
+index e201bce7..95430470 100644
+--- a/src/DefaultBtMessageReceiver.cc
++++ b/src/DefaultBtMessageReceiver.cc
+@@ -72,7 +72,8 @@ DefaultBtMessageReceiver::receiveHandshake(bool quickReply)
+   size_t dataLength = BtHandshakeMessage::MESSAGE_LENGTH;
+   if (handshakeSent_ || !quickReply ||
+       peerConnection_->getBufferLength() < 48) {
+-    if (peerConnection_->receiveHandshake(data, dataLength)) {
++    if (peerConnection_->receiveHandshake(data, dataLength) &&
++        !BtHandshakeMessage::isMalicious(data, dataLength)) {
+       auto msg = messageFactory_->createHandshakeMessage(data, dataLength);
+       msg->validate();
+       return msg;
+@@ -94,7 +95,8 @@ DefaultBtMessageReceiver::receiveHandshake(bool quickReply)
+     }
+     if (peerConnection_->getBufferLength() ==
+             BtHandshakeMessage::MESSAGE_LENGTH &&
+-        peerConnection_->receiveHandshake(data, dataLength)) {
++        peerConnection_->receiveHandshake(data, dataLength) &&
++        !BtHandshakeMessage::isMalicious(data, dataLength)) {
+       auto msg = messageFactory_->createHandshakeMessage(data, dataLength);
+       msg->validate();
+       return msg;
