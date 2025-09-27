@@ -1,0 +1,1390 @@
+From de6aeb2c5a7a9d5409756a95b8e35166e471fc1a Mon Sep 17 00:00:00 2001
+From: Benstone Zhang <benstonezhang@gmail.com>
+Date: Sat, 27 Sep 2025 20:19:19 +0800
+Subject: [PATCH] remove dependency on rust
+
+---
+ INSTALL.md                    |  11 +-
+ Makefile                      |  49 +------
+ Makefile.compiler             |  17 ---
+ README.md                     |  11 ++
+ c_src/bcachefs.c              | 108 ++++++++++++++
+ c_src/cmd_completions.c       |   7 +
+ c_src/cmd_list.c              | 256 ++++++++++++++++++++++++++++++++++
+ c_src/cmd_mount.c             | 217 ++++++++++++++++++++++++++++
+ c_src/cmd_subvolume.c         | 208 +++++++++++++++++++++++++++
+ c_src/cmd_super.c             |   2 +-
+ c_src/cmds.h                  |   4 +
+ c_src/tools-util.c            |  83 ++++++++++-
+ c_src/tools-util.h            |  21 +++
+ debian/control                |   3 -
+ debian/rules                  |  20 +--
+ include/linux/printk.h        |   2 +-
+ make-release-tarball.sh       |  23 +--
+ packaging/bcachefs-tools.spec |   2 +-
+ 19 files changed, 930 insertions(+), 115 deletions(-)
+ delete mode 120000 bcachefs
+ create mode 100644 c_src/cmd_completions.c
+ create mode 100644 c_src/cmd_list.c
+ create mode 100644 c_src/cmd_mount.c
+ create mode 100644 c_src/cmd_subvolume.c
+
+diff --git a/INSTALL.md b/INSTALL.md
+index 89f55071..a646a818 100644
+--- a/INSTALL.md
++++ b/INSTALL.md
+@@ -16,15 +16,6 @@ Build dependencies:
+  * valgrind
+  * zlib1g
+ 
+-In addition a recent Rust toolchain is required (rustc, cargo), either by using
+-[rustup](https://rustup.rs/) or make sure to use a distribution where a recent
+-enough rustc is available. Please check `rust-version` in `Cargo.toml` to see
+-the minimum supported Rust version (MSRV).
+-
+-``` shell
+-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+-```
+-
+ Debian (Bullseye or later) and Ubuntu (20.04 or later): you can install these with
+ 
+ ``` shell
+@@ -44,7 +35,7 @@ Fedora: install build dependencies either with `dnf builddep bcachefs-tools` or
+ dnf install -y @c-development libaio-devel libsodium-devel \
+     libblkid-devel libzstd-devel zlib-devel userspace-rcu-devel \
+     lz4-devel libuuid-devel valgrind-devel keyutils-libs-devel \
+-    findutils systemd-devel clang-devel llvm-devel rust cargo
++    findutils udev systemd-devel llvm-devel
+ ```
+ 
+ openSUSE: install build dependencies with:
+diff --git a/Makefile b/Makefile
+index 9e41dcd4..6645a578 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,4 +1,4 @@
+-VERSION=$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
++#VERSION=$(shell cargo metadata --format-version 1 | jq -r '.packages[] | select(.name | test("bcachefs-tools")) | .version')
+ 
+ PREFIX?=/usr/local
+ LIBEXECDIR?=$(PREFIX)/libexec
+@@ -15,21 +15,6 @@ ifndef BUILD_VERBOSE
+   BUILD_VERBOSE = 0
+ endif
+ 
+-ifeq ($(BUILD_VERBOSE),1)
+-  Q =
+-  CARGO_CLEAN_ARGS = --verbose
+-else
+-  Q = @
+-  CARGO_CLEAN_ARGS = --quiet
+-endif
+-
+-# when cross compiling, cargo places the built binary in a different location
+-ifdef CARGO_BUILD_TARGET
+-	BUILT_BIN = target/$(CARGO_BUILD_TARGET)/release/bcachefs
+-else
+-	BUILT_BIN = target/release/bcachefs
+-endif
+-
+ # Prevent recursive expansions of $(CFLAGS) to avoid repeatedly performing
+ # compile tests
+ CFLAGS:=$(CFLAGS)
+@@ -58,20 +43,6 @@ CFLAGS+=-std=gnu11 -O2 -g -MMD -Wall -fPIC			\
+ # recursive expansion here (CFLAGS is not yet completely built by this line)
+ LDFLAGS+=$(CFLAGS) $(EXTRA_LDFLAGS)
+ 
+-ifdef CARGO_TOOLCHAIN_VERSION
+-  CARGO_TOOLCHAIN = +$(CARGO_TOOLCHAIN_VERSION)
+-endif
+-
+-override CARGO_ARGS+=${CARGO_TOOLCHAIN}
+-CARGO=cargo $(CARGO_ARGS)
+-CARGO_PROFILE=release
+-# CARGO_PROFILE=debug
+-
+-CARGO_BUILD_ARGS=--$(CARGO_PROFILE)
+-CARGO_BUILD=$(CARGO) build $(CARGO_BUILD_ARGS)
+-
+-CARGO_CLEAN=$(CARGO) clean $(CARGO_CLEAN_ARGS)
+-
+ include Makefile.compiler
+ 
+ CFLAGS+=$(call cc-disable-warning, unused-but-set-variable)
+@@ -82,13 +53,11 @@ CFLAGS+=$(call cc-disable-warning, zero-length-array)
+ CFLAGS+=$(call cc-disable-warning, shift-overflow)
+ CFLAGS+=$(call cc-disable-warning, enum-conversion)
+ CFLAGS+=$(call cc-disable-warning, gnu-variable-sized-type-not-at-end)
+-export RUSTFLAGS:=$(RUSTFLAGS) -C default-linker-libraries
+ 
+ PKGCONFIG_LIBS="blkid uuid liburcu libsodium zlib liblz4 libzstd libudev libkeyutils"
+ ifdef BCACHEFS_FUSE
+ 	PKGCONFIG_LIBS+="fuse3 >= 3.7"
+ 	CFLAGS+=-DBCACHEFS_FUSE
+-	RUSTFLAGS+=--cfg feature="fuse"
+ endif
+ 
+ PKGCONFIG_CFLAGS:=$(shell $(PKG_CONFIG) --cflags $(PKGCONFIG_LIBS))
+@@ -143,12 +112,12 @@ OBJS:=$(SRCS:.c=.o)
+ 	$(Q)$(CC) $(CPPFLAGS) $(CFLAGS) -c -o $@ $<
+ 
+ BCACHEFS_DEPS=libbcachefs.a
+-RUST_SRCS:=$(shell find src bch_bindgen/src -type f -iname '*.rs')
+ 
+-bcachefs: $(BCACHEFS_DEPS) $(RUST_SRCS)
+-	$(Q)$(CARGO_BUILD)
++bcachefs: $(BCACHEFS_DEPS)
++	@echo "    [LD]     $@"
++	$(Q)$(CC) $(LDFLAGS) -Wl,--whole-archive $+ $(LOADLIBES) -Wl,--no-whole-archive $(LDLIBS) -o $@
+ 
+-libbcachefs.a: $(OBJS)
++libbcachefs.a: $(filter-out ./tests/%.o, $(OBJS))
+ 	@echo "    [AR]     $@"
+ 	$(Q)$(AR) -rc $@ $+
+ 
+@@ -175,7 +144,7 @@ initramfs/hook: initramfs/hook.in
+ install: INITRAMFS_HOOK=$(INITRAMFS_DIR)/hooks/bcachefs
+ install: INITRAMFS_SCRIPT=$(INITRAMFS_DIR)/scripts/local-premount/bcachefs
+ install: all install_dkms
+-	$(INSTALL) -m0755 -D $(BUILT_BIN)  -t $(DESTDIR)$(ROOT_SBINDIR)
++	$(INSTALL) -m0755 -D bcachefs      -t $(DESTDIR)$(ROOT_SBINDIR)
+ 	$(INSTALL) -m0644 -D bcachefs.8    -t $(DESTDIR)$(PREFIX)/share/man/man8/
+ 	$(INSTALL) -m0755 -D initramfs/script $(DESTDIR)$(INITRAMFS_SCRIPT)
+ 	$(INSTALL) -m0755 -D initramfs/hook   $(DESTDIR)$(INITRAMFS_HOOK)
+@@ -201,7 +170,6 @@ install_dkms: dkms/dkms.conf
+ clean:
+ 	@echo "Cleaning all"
+ 	$(Q)$(RM) libbcachefs.a c_src/libbcachefs.a .version dkms/dkms.conf *.tar.xz $(OBJS) $(DEPS) $(DOCGENERATED)
+-	$(Q)$(CARGO_CLEAN)
+ 	$(Q)$(RM) -f $(built_scripts)
+ 
+ .PHONY: deb
+@@ -218,11 +186,6 @@ bcachefs-principles-of-operation.pdf: doc/bcachefs-principles-of-operation.tex
+ 
+ doc: bcachefs-principles-of-operation.pdf
+ 
+-.PHONY: cargo-update-msrv
+-cargo-update-msrv:
+-	cargo +nightly generate-lockfile -Zmsrv-policy
+-	cargo +nightly generate-lockfile --manifest-path bch_bindgen/Cargo.toml -Zmsrv-policy
+-
+ .PHONY: update-bcachefs-sources
+ update-bcachefs-sources:
+ 	git rm -rf --ignore-unmatch libbcachefs
+diff --git a/Makefile.compiler b/Makefile.compiler
+index ef91910d..5fcae996 100644
+--- a/Makefile.compiler
++++ b/Makefile.compiler
+@@ -74,20 +74,3 @@ rustc-min-version = $(call test-ge, $(CONFIG_RUSTC_VERSION), $1)
+ # ld-option
+ # Usage: KBUILD_LDFLAGS += $(call ld-option, -X, -Y)
+ ld-option = $(call try-run, $(LD) $(KBUILD_LDFLAGS) $(1) -v,$(1),$(2),$(3))
+-
+-# __rustc-option
+-# Usage: MY_RUSTFLAGS += $(call __rustc-option,$(RUSTC),$(MY_RUSTFLAGS),-Cinstrument-coverage,-Zinstrument-coverage)
+-# TODO: remove RUSTC_BOOTSTRAP=1 when we raise the minimum GNU Make version to 4.4
+-__rustc-option = $(call try-run,\
+-	echo '$(pound)![allow(missing_docs)]$(pound)![feature(no_core)]$(pound)![no_core]' | RUSTC_BOOTSTRAP=1\
+-	$(1) --sysroot=/dev/null $(filter-out --sysroot=/dev/null --target=%,$(2)) $(3)\
+-	--crate-type=rlib --out-dir=$(TMPOUT) --emit=obj=- - >/dev/null,$(3),$(4))
+-
+-# rustc-option
+-# Usage: rustflags-y += $(call rustc-option,-Cinstrument-coverage,-Zinstrument-coverage)
+-rustc-option = $(call __rustc-option, $(RUSTC),\
+-	$(KBUILD_RUSTFLAGS),$(1),$(2))
+-
+-# rustc-option-yn
+-# Usage: flag := $(call rustc-option-yn,-Cinstrument-coverage)
+-rustc-option-yn = $(if $(call rustc-option,$1),y,n)
+diff --git a/README.md b/README.md
+index f95defa5..f85541d3 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,14 @@
++bcachefs-tools-c
++==============
++Userspace tools and docs for bcachefs without rust code
++
++This is a pure C implementation of original bcachefs-tools, intended for some special cases without
++a rust toolchain or binary size is critical.
++
++For now, subcommand `completions` not implemented.
++
++Below is the original README.
++
+ bcachefs-tools
+ ==============
+ Userspace tools and docs for bcachefs
+diff --git a/c_src/bcachefs.c b/c_src/bcachefs.c
+index d91e0475..89967f35 100644
+--- a/c_src/bcachefs.c
++++ b/c_src/bcachefs.c
+@@ -109,3 +109,111 @@ void bcachefs_usage(void)
+          "  completions              Generate shell completions\n"
+ 	     "  version                  Display the version of the invoked bcachefs tool\n");
+ }
++
++
++int main(int argc, char *argv[])
++{
++	raid_init();
++
++	setvbuf(stdout, NULL, _IOLBF, 0);
++
++	char *full_cmd = argv[0];
++
++	/* Are we being called via a symlink? */
++
++	if (strstr(full_cmd, "mkfs"))
++		return cmd_format(argc, argv);
++
++	if (strstr(full_cmd, "fsck"))
++		return cmd_fsck(argc, argv);
++
++#ifdef BCACHEFS_FUSE
++	if (strstr(full_cmd, "mount.fuse"))
++		return cmd_fusemount(argc, argv);
++#endif
++
++	if (strstr(full_cmd, "mount"))
++		return cmd_mount(argc, argv);
++
++	char *cmd = pop_cmd(&argc, argv);
++	if (!cmd) {
++		puts("missing command\n");
++		goto usage;
++	}
++
++	/* these subcommands display usage when argc < 2 */
++	if (!strcmp(cmd, "device"))
++		return device_cmds(argc, argv);
++	if (!strcmp(cmd, "fs"))
++		return fs_cmds(argc, argv);
++	if (!strcmp(cmd, "data"))
++		return data_cmds(argc, argv);
++	if (!strcmp(cmd, "subvolume"))
++		return subvolume_cmds(argc, argv);
++	if (!strcmp(cmd, "format"))
++		return cmd_format(argc, argv);
++	if (!strcmp(cmd, "fsck"))
++		return cmd_fsck(argc, argv);
++	if (!strcmp(cmd, "version"))
++		return cmd_version(argc, argv);
++	if (!strcmp(cmd, "show-super"))
++		return cmd_show_super(argc, argv);
++	if (!strcmp(cmd, "set-option"))
++		return cmd_set_option(argc, argv);
++	if (!strcmp(cmd, "reset-counters"))
++		return cmd_reset_counters(argc, argv);
++
++#if 0
++	if (!strcmp(cmd, "assemble"))
++		return cmd_assemble(argc, argv);
++	if (!strcmp(cmd, "incremental"))
++		return cmd_incremental(argc, argv);
++	if (!strcmp(cmd, "run"))
++		return cmd_run(argc, argv);
++	if (!strcmp(cmd, "stop"))
++		return cmd_stop(argc, argv);
++#endif
++
++	if (!strcmp(cmd, "unlock"))
++		return cmd_unlock(argc, argv);
++	if (!strcmp(cmd, "set-passphrase"))
++		return cmd_set_passphrase(argc, argv);
++	if (!strcmp(cmd, "remove-passphrase"))
++		return cmd_remove_passphrase(argc, argv);
++
++	if (!strcmp(cmd, "migrate"))
++		return cmd_migrate(argc, argv);
++	if (!strcmp(cmd, "migrate-superblock"))
++		return cmd_migrate_superblock(argc, argv);
++
++	if (!strcmp(cmd, "dump"))
++		return cmd_dump(argc, argv);
++	if (!strcmp(cmd, "list"))
++		return cmd_list(argc, argv);
++	if (!strcmp(cmd, "list_journal"))
++		return cmd_list_journal(argc, argv);
++
++	if (!strcmp(cmd, "setattr"))
++		return cmd_setattr(argc, argv);
++
++	if (!strcmp(cmd, "completions"))
++		return cmd_completions(argc, argv);
++
++#ifdef BCACHEFS_FUSE
++	if (!strcmp(cmd, "fusemount"))
++		return cmd_fusemount(argc, argv);
++#endif
++
++	if (!strcmp(cmd, "mount"))
++		return cmd_mount(argc, argv);
++
++	if (!strcmp(cmd, "--help")) {
++		bcachefs_usage();
++		return 0;
++	}
++
++	printf("Unknown command %s\n", cmd);
++usage:
++	bcachefs_usage();
++	exit(EXIT_FAILURE);
++}
+diff --git a/c_src/cmd_completions.c b/c_src/cmd_completions.c
+new file mode 100644
+index 00000000..245eb727
+--- /dev/null
++++ b/c_src/cmd_completions.c
+@@ -0,0 +1,7 @@
++#include "cmds.h"
++#include "libbcachefs.h"
++
++int cmd_completions(int argc, char *argv[])
++{
++	die("not implemented yet");
++}
+diff --git a/c_src/cmd_list.c b/c_src/cmd_list.c
+new file mode 100644
+index 00000000..4b5f2142
+--- /dev/null
++++ b/c_src/cmd_list.c
+@@ -0,0 +1,256 @@
++#include <getopt.h>
++
++#include "cmds.h"
++#include "libbcachefs.h"
++#include "tools-util.h"
++#include "libbcachefs/super.h"
++#include "libbcachefs/btree_iter.h"
++#include "libbcachefs/debug.h"
++
++enum list_modes {
++	MODE_KEYS,
++	MODE_FORMATS,
++	MODE_NODES,
++	MODE_NODES_ON_DISK,
++};
++
++static enum btree_id tree_id = BTREE_ID_extents;
++static enum bch_bkey_type bkey_type = KEY_TYPE_MAX;
++static int list_level = 0;
++static struct bpos pos_start;
++static struct bpos pos_end;
++static enum list_modes list_mode = MODE_KEYS;
++static bool run_fsck = false;
++static int verbose = 0;
++
++static void list_usage(void)
++{
++	puts("bcachefs list - list filesystem metadata in textual form\n"
++	     "Usage: bcachefs list [OPTION] devices\n"
++	     "\n"
++	     "Options:\n"
++	     "  -b, --btree=   Btree to list from [default: extents]\n"
++	     "  -t, --type=    Btree key type to list [default: all types]\n"
++	     "  -l, --level=   Btree depth to descend to (0 = leaves) [default: 0]\n"
++	     "  -s, --start=   Start position to list from [default: POS_MIN]\n"
++	     "  -e, --end=     End position [default: SPOS_MAX]\n"
++	     "  -m, --mode=    possible values: keys, formats, nodes, nodes-ondisk. [default: keys]\n"
++	     "  -f, --fsck     Check the filesystem first\n"
++	     "  -v, --verbose  Verbose mode\n"
++	     "  -h, --help     Print help");
++}
++
++static int list_keys(struct bch_fs *fs)
++{
++	struct btree_trans *trans = bch2_trans_get(fs);
++	struct btree_iter iter;
++	struct printbuf buf;
++
++	bch2_trans_iter_init_outlined(trans, &iter, tree_id, pos_start,
++				      BTREE_ITER_prefetch | BTREE_ITER_all_snapshots, 0);
++	while (1) {
++		struct bkey_s_c k = bch2_btree_iter_peek_and_restart_outlined(&iter);
++		if (!k.k || bpos_cmp(k.k->p, pos_end) > 0)
++			break;
++		if ((bkey_type >= KEY_TYPE_MAX) || (k.k->type == bkey_type)) {
++			buf = PRINTBUF;
++			bch2_bkey_val_to_text(&buf, fs, k);
++			puts(buf.buf);
++			printbuf_exit(&buf);
++		}
++		bch2_btree_iter_advance(&iter);
++	}
++
++	bch2_trans_iter_exit(&iter);
++	bch2_trans_put(trans);
++
++	return 0;
++}
++
++static int list_btree_formats(struct bch_fs *fs)
++{
++	struct btree_trans *trans = bch2_trans_get(fs);
++	struct btree_iter iter;
++	struct printbuf buf;
++
++	bch2_trans_node_iter_init(trans, &iter, tree_id, pos_start, 0,
++				  list_level, BTREE_ITER_prefetch);
++
++	while (1) {
++		struct btree *b = bch2_btree_iter_peek_node_and_restart(&iter);
++		if (bpos_cmp(b->key.k.p, pos_end) > 0)
++			break;
++		buf = PRINTBUF;
++		bch2_btree_node_to_text(&buf, fs, b);
++		puts(buf.buf);
++		printbuf_exit(&buf);
++	}
++
++	bch2_trans_iter_exit(&iter);
++	bch2_trans_put(trans);
++
++	return 0;
++}
++
++static int list_btree_nodes(struct bch_fs *fs)
++{
++	struct btree_trans *trans = bch2_trans_get(fs);
++	struct btree_iter iter;
++	struct printbuf buf;
++
++	bch2_trans_node_iter_init(trans, &iter, tree_id, pos_start, 0,
++				  list_level, BTREE_ITER_prefetch);
++	while (1) {
++		struct btree *b = bch2_btree_iter_peek_node_and_restart(&iter);
++
++		if (bpos_cmp(b->key.k.p, pos_end) > 0)
++			break;
++		buf = PRINTBUF;
++		bch2_bkey_val_to_text(&buf, fs, bkey_i_to_s_c(&b->key));
++		puts(buf.buf);
++		printbuf_exit(&buf);
++	}
++
++	bch2_trans_iter_exit(&iter);
++	bch2_trans_put(trans);
++
++	return 0;
++}
++
++static int list_nodes_ondisk(struct bch_fs *fs)
++{
++	struct btree_trans *trans = bch2_trans_get(fs);
++	struct btree_iter iter;
++	struct printbuf buf;
++
++	bch2_trans_node_iter_init(trans, &iter, tree_id, pos_start, 0,
++				  list_level, BTREE_ITER_prefetch);
++	while (1) {
++		struct btree *b = bch2_btree_iter_peek_node_and_restart(&iter);
++
++		if (bpos_cmp(b->key.k.p, pos_end) > 0)
++			break;
++		buf = PRINTBUF;
++		bch2_btree_node_ondisk_to_text(&buf, fs, b);
++		puts(buf.buf);
++		printbuf_exit(&buf);
++	}
++
++	bch2_trans_iter_exit(&iter);
++	bch2_trans_put(trans);
++
++	return 0;
++}
++
++int cmd_list(int argc, char *argv[])
++{
++	static const struct option long_opts[] = {
++		{"btree",   required_argument, NULL,        'b'},
++		{"type",    required_argument, NULL,        't'},
++		{"level",   required_argument, &list_level, 0},
++		{"start",   required_argument, NULL,        's'},
++		{"end",     required_argument, NULL,        'e'},
++		{"mode",    required_argument, NULL,        'm'},
++		{"fsck",    no_argument,       NULL,        'f'},
++		{"verbose", no_argument,       &verbose,    1},
++		{NULL}
++	};
++	int opt, ret = 0;
++
++	pos_start = POS_MIN;
++	pos_end = SPOS_MAX;
++
++	check_bcachefs_module();
++
++	while ((opt = getopt_long(argc, argv, "b:l:s:e:m:fv", long_opts, NULL)) != -1)
++		switch (opt) {
++			case 'b':
++				tree_id = strtol(optarg, NULL, 10);
++				if (tree_id < 0 || tree_id >= BTREE_ID_NR)
++					die("invalid btree_id");
++				break;
++			case 't':
++				bkey_type = (enum bch_bkey_type)strtol(optarg, NULL, 10);
++				break;
++			case 'l':
++				list_level = strtol(optarg, NULL, 10);
++				break;
++			case 's':
++				break;
++			case 'e':
++				break;
++			case 'm':
++				if (!strcmp(optarg, "keys"))
++					list_mode = MODE_KEYS;
++				else if (!strcmp(optarg, "formats"))
++					list_mode = MODE_FORMATS;
++				else if (!strcmp(optarg, "nodes"))
++					list_mode = MODE_NODES;
++				else if (!strcmp(optarg, "nodes-ondisk"))
++					list_mode = MODE_NODES_ON_DISK;
++				else {
++					list_usage();
++					exit(16);
++				}
++				break;
++			case 'f':
++				run_fsck = true;
++				break;
++			case 'v':
++				verbose = 1;
++				break;
++			default:
++				list_usage();
++				exit(16);
++		}
++
++	args_shift(optind);
++
++	if (!argc) {
++		list_usage();
++		exit(8);
++	}
++
++	darray_const_str devs = get_or_split_cmdline_devs(argc, argv);
++
++	struct bch_opts opts = bch2_opts_empty();
++	opt_set(opts, nochanges, true);
++	opt_set(opts, read_only, true);
++	opt_set(opts, norecovery, true);
++	opt_set(opts, degraded, true);
++	opt_set(opts, errors, BCH_ON_ERROR_continue);
++
++	if (run_fsck) {
++		opt_set(opts, fix_errors, FSCK_FIX_yes);
++		opt_set(opts, norecovery, false);
++	}
++	if (verbose)
++		opt_set(opts, verbose, true);
++
++	struct bch_fs *fs = bch2_fs_open(&devs, &opts);
++	if (IS_ERR(fs))
++		die("failed open filesystem");
++
++	switch (list_mode) {
++		case MODE_KEYS:
++			ret = list_keys(fs);
++			break;
++		case MODE_FORMATS:
++			ret = list_btree_formats(fs);
++			break;
++		case MODE_NODES:
++			ret = list_btree_nodes(fs);
++			break;
++		case MODE_NODES_ON_DISK:
++			ret = list_nodes_ondisk(fs);
++			break;
++	}
++
++	bch2_fs_stop(fs);
++
++	darray_for_each(devs, i)
++		free((char *)*i);
++	darray_exit(&devs);
++
++	return ret;
++}
+diff --git a/c_src/cmd_mount.c b/c_src/cmd_mount.c
+new file mode 100644
+index 00000000..bf8980d0
+--- /dev/null
++++ b/c_src/cmd_mount.c
+@@ -0,0 +1,217 @@
++#include <getopt.h>
++
++#include <sys/mount.h>
++#include <blkid/blkid.h>
++
++#include "cmds.h"
++#include "libbcachefs.h"
++#include "tools-util.h"
++#include "crypto.h"
++#include "libbcachefs/super-io.h"
++#include "libbcachefs/util.h"
++
++typedef enum {
++	POLICY_FAIL,
++	POLICY_WAIT,
++	POLICY_ASK,
++} unlock_policy;
++
++typedef struct {
++	const char *name;
++	unsigned int mask;
++} option_flags;
++
++static const option_flags mount_opt_flags[] = {
++	{"rw",		0U},
++	{"ro",		MS_RDONLY},
++	{"nosuid",	MS_NOSUID},
++	{"nodev",	MS_NODEV},
++	{"noexec",	MS_NOEXEC},
++	{"sync",	MS_SYNCHRONOUS},
++	{"remount",	MS_REMOUNT},
++	{"mand",	MS_MANDLOCK},
++	{"dirsync",	MS_DIRSYNC},
++	{"noatime",	MS_NOATIME},
++	{"nodiratime",	MS_NODIRATIME},
++	{"relatime",	MS_RELATIME},
++	{"strictatime",	MS_STRICTATIME},
++	{"lazytime",	MS_LAZYTIME},
++};
++static const int flag_count = sizeof(mount_opt_flags) / sizeof(mount_opt_flags[0]);
++
++static int verbose = 0;
++
++static void mount_usage(void)
++{
++	puts("bcachefs mount - filesystem mount\n"
++	     "Usage: bcachefs mount [OPTION] devices mountpoint\n"
++	     "\n"
++	     "Options:\n");
++
++	bch2_opts_usage(OPT_MOUNT);
++
++	puts("  -o, --options=\n"
++	     "      Mount options provided as a comma-separated list. See user guide for complete list.\n"
++	     "           degraded   Allow mounting with data degraded\n"
++	     "           verbose    Extra debugging info during mount/recovery\n"
++	     "           fsck       Run fsck during mount\n"
++	     "           fix_errors Fix errors without asking during fsck\n"
++	     "           read_only  Mount in read only mode\n"
++	     "           version_upgrade\n"
++	     "  -f, --passphrase_file=\n"
++	     "      Passphrase file to read from (disables passphrase prompt)\n"
++	     "  -k, --key-location=(fail | wait | ask)\n"
++	     "      How the password would be loaded. (default: ask).\n"
++	     "          fail    don't ask for password, fail if filesystem is encrypted.\n"
++	     "          wait    wait for password to become available before mounting.\n"
++	     "          ask     prompt the user for password.\n"
++	     "  -v, --verbose\n"
++	     "      Be verbose. Can be specified more than once.");
++}
++
++/* Parse a comma-separated mount options and split out mountflags and filesystem specific options. */
++static unsigned int parse_mount_options(const char *_opts, char **mount_options)
++{
++	unsigned int flag = 0U;
++	int i;
++	char *opts, *orig, *s, *remain = NULL;
++
++	opts = orig = xstrdup(_opts);
++	*mount_options = xmalloc(strlen(orig) + 1);
++
++	while ((s = strsep(&opts, ","))) {
++		i = 0;
++		for (;;) {
++			if (!strcmp(s, mount_opt_flags[i].name)) {
++				flag |= mount_opt_flags[i].mask;
++				break;
++			}
++			i++;
++			if (i == flag_count) {
++				if (!remain) {
++					remain = *mount_options;
++				} else {
++					*remain++ = ',';
++				}
++				int l = strlen(s);
++				memcpy(remain, s, l);
++				remain += l;
++				break;
++			}
++		}
++	}
++	*remain = '\0';
++
++	free(orig);
++	return flag;
++}
++
++static void unlock_super(const char *devs_str, const char *passphrase_file, unlock_policy policy)
++{
++	// get the first dev
++	char *dev = xstrdup(devs_str);
++	char *sep = strchr(dev, ':');
++	if (sep)
++		*sep = '\0';
++
++	// Check if the filesystem's master key is encrypted
++	struct bch_opts opts = bch2_opts_empty();
++	opt_set(opts, noexcl, true);
++	opt_set(opts, nochanges, true);
++	if (verbose)
++		opt_set(opts, verbose, true);
++
++	struct bch_sb_handle sb;
++	int ret = bch2_read_super(dev, &opts, &sb);
++	if (ret)
++		die("Error opening %s: %s", dev, bch2_err_str(ret));
++
++	if (bch2_sb_is_encrypted(sb.sb)) {
++		char *passphrase = NULL;
++		// First by password_file, if available
++		if (passphrase_file)
++			passphrase = read_file_str(AT_FDCWD, passphrase_file);
++		else if (policy == POLICY_ASK)
++			passphrase = read_passphrase("Enter passphrase: ");
++		if (passphrase) {
++			bch2_add_key(sb.sb, "user", "user", passphrase);
++			bch2_free_super(&sb);
++			memzero_explicit(passphrase, strlen(passphrase));
++			free(passphrase);
++			printf("superblock unlocked: %s\n", dev);
++		} else {
++			bch2_free_super(&sb);
++			die("Failed to decrypt file system");
++		}
++	} else
++		bch2_free_super(&sb);
++
++	free(dev);
++}
++
++int cmd_mount(int argc, char *argv[]){
++	static const struct option long_opts[] = {
++		{"passphrase_file",	optional_argument,	NULL,	'f'},
++		{"key_location",	required_argument,	NULL,	'k'},
++		{"options",	required_argument,	NULL,	'o'},
++		{"verbose",	no_argument,		&verbose,	1},
++		{NULL}
++	};
++	int opt;
++	unlock_policy policy = POLICY_ASK;
++	unsigned int mount_flags = 0U;
++	const char *passphrase_file = NULL;
++	char *mount_options = NULL;
++	char *devs_str;
++	const char *mount_point;
++
++	check_bcachefs_module();
++
++	while ((opt = getopt_long(argc,argv,"f:k:o:v",long_opts,NULL)) != -1)
++		switch (opt) {
++			case 'f':
++				passphrase_file = optarg;
++				break;
++			case 'k':
++				if (!strcmp(optarg,"fail"))
++					policy = POLICY_FAIL;
++				else if (!strcmp_prefix(optarg,"wait"))
++					policy = POLICY_WAIT;
++				else if (!strcmp(optarg,"ask"))
++					policy = POLICY_ASK;
++				else {
++					mount_usage();
++					exit(16);
++				}
++				break;
++			case 'o':
++				mount_flags = parse_mount_options(optarg, &mount_options);
++				break;
++			case 'v':
++				verbose = 1;
++				break;
++			default:
++				mount_usage();
++				exit(16);
++		}
++
++	args_shift(optind);
++
++	if (argc != 2) {
++		mount_usage();
++		exit(8);
++	}
++
++	mount_point = argv[1];
++
++	devs_str = bch2_scan_devices(argv[0]);
++	unlock_super(devs_str, passphrase_file, policy);
++
++	printf("mounting devices %s to %s\n", devs_str, mount_point);
++	int ret = mount(devs_str, mount_point, "bcachefs", mount_flags, mount_options);
++	if (ret)
++		die("mount failed: %s", strerror(ret));
++
++	free(devs_str);
++	return 0;
++}
+diff --git a/c_src/cmd_subvolume.c b/c_src/cmd_subvolume.c
+new file mode 100644
+index 00000000..a8e5dd63
+--- /dev/null
++++ b/c_src/cmd_subvolume.c
+@@ -0,0 +1,208 @@
++#include <errno.h>
++#include <fcntl.h>
++#include <getopt.h>
++#include <libgen.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/ioctl.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#include "libbcachefs/bcachefs.h"
++#include "libbcachefs/bcachefs_ioctl.h"
++#include "cmds.h"
++#include "libbcachefs.h"
++#include "libbcachefs/opts.h"
++#include "tools-util.h"
++
++int subvolume_usage(void)
++{
++	puts("bcachefs subvolume - manage subvolumes and snapshots\n"
++	     "Usage: bcachefs subvolume <CMD> [OPTION]\n"
++	     "\n"
++	     "Commands:\n"
++	     "  create                  create a subvolume\n"
++	     "  delete                  delete a subvolume\n"
++	     "  snapshot                create a snapshot\n"
++	     "\n"
++	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
++	return 0;
++}
++
++static void subvolume_create_usage(void)
++{
++	puts("bcachefs subvolume create - create a new subvolume\n"
++	     "Usage: bcachefs subvolume create [OPTION]... path\n"
++	     "\n"
++	     "Options:\n"
++	     "  -h, --help                  Display this help and exit\n"
++	     "\n"
++	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
++}
++
++int cmd_subvolume_create(int argc, char *argv[])
++{
++	static const struct option longopts[] = {
++		{ "help",		no_argument,		NULL, 'h' },
++		{ NULL }
++	};
++	char *path;
++	int opt;
++
++	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
++		switch (opt) {
++		case 'h':
++			subvolume_create_usage();
++			exit(EXIT_SUCCESS);
++		}
++	args_shift(optind);
++
++	while ((path = arg_pop())) {
++		char *dir = dirname(xstrdup(path));
++
++		struct bchfs_handle fs = bcache_fs_open(dir);
++
++		struct bch_ioctl_subvolume i = {
++			.dirfd		= AT_FDCWD,
++			.mode		= 0777,
++			.dst_ptr	= (unsigned long)path,
++		};
++
++		xioctl(fs.ioctl_fd, BCH_IOCTL_SUBVOLUME_CREATE, &i);
++		bcache_fs_close(fs);
++        free(dir);
++	}
++
++	return 0;
++}
++
++static void subvolume_delete_usage(void)
++{
++	puts("bcachefs subvolume delete - delete an existing subvolume\n"
++	     "Usage: bcachefs subvolume delete [OPTION]... path\n"
++	     "\n"
++	     "Options:\n"
++	     "  -h, --help                  Display this help and exit\n"
++	     "\n"
++	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
++}
++
++int cmd_subvolume_delete(int argc, char *argv[])
++{
++	static const struct option longopts[] = {
++		{ "help",		no_argument,		NULL, 'h' },
++		{ NULL }
++	};
++	char *path;
++	int opt;
++
++	while ((opt = getopt_long(argc, argv, "h", longopts, NULL)) != -1)
++		switch (opt) {
++		case 'h':
++			subvolume_delete_usage();
++			exit(EXIT_SUCCESS);
++		}
++	args_shift(optind);
++
++	while ((path = arg_pop())) {
++		char *dir = dirname(xstrdup(path));
++
++		struct bchfs_handle fs = bcache_fs_open(dir);
++
++		struct bch_ioctl_subvolume i = {
++			.dirfd		= AT_FDCWD,
++			.mode		= 0777,
++			.dst_ptr	= (unsigned long)path,
++		};
++
++		xioctl(fs.ioctl_fd, BCH_IOCTL_SUBVOLUME_DESTROY, &i);
++		bcache_fs_close(fs);
++        free(dir);
++	}
++
++	return 0;
++}
++
++static void snapshot_create_usage(void)
++{
++	puts("bcachefs subvolume snapshot - create a snapshot \n"
++	     "Usage: bcachefs subvolume snapshot [OPTION]... <source> <dest>\n"
++	     "\n"
++	     "Create a snapshot of <source> at <dest>. If specified, <source> must be a subvolume;\n"
++	     "if not specified the snapshot will be of the subvolme containing <dest>.\n"
++	     "Options:\n"
++	     "  -r                          Make snapshot read only\n"
++	     "  -h, --help                  Display this help and exit\n"
++	     "\n"
++	     "Report bugs to <linux-bcachefs@vger.kernel.org>");
++}
++
++int cmd_subvolume_snapshot(int argc, char *argv[])
++{
++	static const struct option longopts[] = {
++		{ "help",		no_argument,		NULL, 'h' },
++		{ NULL }
++	};
++	unsigned flags = BCH_SUBVOL_SNAPSHOT_CREATE;
++	int opt;
++
++	while ((opt = getopt_long(argc, argv, "rh", longopts, NULL)) != -1)
++		switch (opt) {
++		case 'r':
++			flags |= BCH_SUBVOL_SNAPSHOT_RO;
++			break;
++		case 'h':
++			snapshot_create_usage();
++			exit(EXIT_SUCCESS);
++		}
++	args_shift(optind);
++
++	char *src = arg_pop();
++	char *dst = arg_pop();
++
++	if (argc)
++		die("Too many arguments");
++
++	if (!dst)
++		swap(src, dst);
++	if (!dst)
++		die("Please specify a path to create");
++
++	char *dir = dirname(xstrdup(dst));
++
++	struct bchfs_handle fs = bcache_fs_open(dir);
++
++	struct bch_ioctl_subvolume i = {
++		.flags		= flags,
++		.dirfd		= AT_FDCWD,
++		.mode		= 0777,
++		.src_ptr	= (unsigned long)src,
++		.dst_ptr	= (unsigned long)dst,
++	};
++
++	xioctl(fs.ioctl_fd, BCH_IOCTL_SUBVOLUME_CREATE, &i);
++	bcache_fs_close(fs);
++    free(dir);
++    return 0;
++}
++
++int subvolume_cmds(int argc, char *argv[])
++{
++	check_bcachefs_module();
++
++	char *cmd = pop_cmd(&argc, argv);
++	if (argc < 1)
++		return subvolume_usage();
++	if (!strcmp(cmd, "create") || !strcmp(cmd, "new"))
++		return cmd_subvolume_create(argc, argv);
++	if (!strcmp(cmd, "delete") || !strcmp(cmd, "del"))
++		return cmd_subvolume_delete(argc, argv);
++	if (!strcmp(cmd, "snapshot") || !strcmp(cmd, "snap"))
++		return cmd_subvolume_snapshot(argc, argv);
++
++	return 0;
++}
+diff --git a/c_src/cmd_super.c b/c_src/cmd_super.c
+index 1f93ed25..b4dcacfb 100644
+--- a/c_src/cmd_super.c
++++ b/c_src/cmd_super.c
+@@ -29,7 +29,7 @@
+ 
+ #include "libbcachefs/darray.h"
+ 
+-#include "src/rust_to_c.h"
++#include "tools-util.h"
+ 
+ static void show_super_usage(void)
+ {
+diff --git a/c_src/cmds.h b/c_src/cmds.h
+index fa4b87a9..c137d16e 100644
+--- a/c_src/cmds.h
++++ b/c_src/cmds.h
+@@ -57,4 +57,8 @@ void bcachefs_usage(void);
+ int fs_cmds(int argc, char *argv[]);
+ int subvolume_cmds(int argc, char *argv[]);
+ 
++int cmd_mount(int argc, char *argv[]);
++int cmd_list(int argc, char *argv[]);
++int cmd_completions(int argc, char *argv[]);
++
+ #endif /* _CMDS_H */
+diff --git a/c_src/tools-util.c b/c_src/tools-util.c
+index 7733b9e9..b75dfac7 100644
+--- a/c_src/tools-util.c
++++ b/c_src/tools-util.c
+@@ -22,7 +22,6 @@
+ #include "linux/sort.h"
+ #include "tools-util.h"
+ #include "libbcachefs/util.h"
+-#include "src/rust_to_c.h"
+ 
+ void die(const char *fmt, ...)
+ {
+@@ -656,6 +655,14 @@ got_model:
+ 	}
+ }
+ 
++void check_bcachefs_module()
++{
++	const char *path = "/sys/module/bcachefs";
++	struct stat statbuf;
++	if (stat(path, &statbuf))
++		die("bcachefs module not loaded");
++}
++
+ static int kstrtoull_symbolic(const char *s, unsigned int base, unsigned long long *res)
+ {
+ 	if (!strcmp(s, "U64_MAX")) {
+@@ -781,6 +788,8 @@ darray_const_str get_or_split_cmdline_devs(int argc, char *argv[])
+ 		char *dev = bch2_scan_devices(argv[0]);
+ 
+ 		bch2_split_devs(dev, &ret);
++
++		free(dev);
+ 	} else {
+ 		for (unsigned i = 0; i < argc; i++)
+ 			darray_push(&ret, strdup(argv[i]));
+@@ -799,3 +808,75 @@ char *pop_cmd(int *argc, char *argv[])
+ 
+ 	return cmd;
+ }
++
++static char *get_name_from_uuid(const char *uuid)
++{
++	blkid_cache cache = NULL;
++	blkid_dev_iterate iter;
++	blkid_dev dev;
++	darray_str devs = { 0 };
++	int ret;
++	int len = 0;
++	char *dev_name, *s;
++
++	if ((ret = blkid_get_cache(&cache, NULL)) != 0) {
++		die("error creating blkid cache (%d)", ret);
++	}
++
++	iter = blkid_dev_iterate_begin(cache);
++	blkid_dev_set_search(iter, "UUID", uuid);
++	while (blkid_dev_next(iter, &dev) == 0) {
++		const char *name = blkid_dev_devname(dev);
++		const char *type = blkid_get_tag_value (cache, "TYPE", name);
++		if (!strcmp(type, "bcachefs")) {
++			len += strlen(name) + 1;
++			darray_push(&devs, xstrdup(name));
++		}
++	}
++	blkid_dev_iterate_end(iter);
++	blkid_put_cache(cache);
++
++	if (!len)
++		die("no device found");
++
++	dev_name = s = xmalloc(len);
++	darray_for_each(devs, i) {
++		char *p = *i;
++		strcpy(s, p);
++		len = strlen(p);
++		free(p);
++		s += len;
++		*s = ':';
++		s++;
++	}
++	s--;
++	*s = '\0';
++
++	darray_exit(&devs);
++
++	return dev_name;
++}
++
++int bch2_scan_device_sbs(char *devs_str, sb_names *ret)
++{
++	char *s = bch2_scan_devices(devs_str);
++	free(s);
++	return 0;
++}
++
++char *bch2_scan_devices(char *devs_str)
++{
++	if (!strncmp(devs_str, "UUID=", 5))
++		return get_name_from_uuid(devs_str + 5);
++	else if (!strncmp(devs_str, "OLD_BLKID_UUID=", 15))
++		return get_name_from_uuid(devs_str + 15);
++	else
++	{
++		// If the device string contains ":" we will assume the user knows the
++		// entire list. If they supply a single device it could be either the FS
++		// only has 1 device or it's only 1 of a number of devices which are
++		// part of the FS. This appears to be the case when we get called during
++		// fstab mount processing and the fstab specifies a UUID.
++		return xstrdup(devs_str);
++	}
++}
+diff --git a/c_src/tools-util.h b/c_src/tools-util.h
+index 988e2d62..656bd6a7 100644
+--- a/c_src/tools-util.h
++++ b/c_src/tools-util.h
+@@ -3,6 +3,7 @@
+ 
+ #include <errno.h>
+ #include <mntent.h>
++#include <string.h>
+ #include <stdbool.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -69,6 +70,16 @@ static inline void *xrealloc(void *p, size_t size)
+ 	return p;
+ }
+ 
++static inline char *xstrdup(const char *s)
++{
++	void *p = strdup(s);
++
++	if (!p)
++		die("insufficient memory");
++
++	return p;
++}
++
+ #define xopenat(_dirfd, _path, ...)					\
+ ({									\
+ 	int _fd = openat((_dirfd), (_path), __VA_ARGS__);		\
+@@ -195,6 +206,7 @@ char *dev_to_path(dev_t);
+ struct mntent *dev_to_mount(const char *);
+ int dev_mounted(const char *);
+ char *fd_to_dev_model(int);
++void check_bcachefs_module();
+ 
+ #define args_shift(_nr)							\
+ do {									\
+@@ -226,5 +238,14 @@ unsigned version_parse(char *);
+ darray_const_str get_or_split_cmdline_devs(int argc, char *argv[]);
+ 
+ char *pop_cmd(int *argc, char *argv[]);
++struct sb_name {
++  const char		*name;
++  struct bch_sb_handle	sb;
++};
++typedef DARRAY(struct sb_name) sb_names;
++
++int bch2_scan_device_sbs(char *, sb_names *ret);
++
++char *bch2_scan_devices(char *);
+ 
+ #endif /* _TOOLS_UTIL_H */
+diff --git a/debian/control b/debian/control
+index 54e1df5a..8dc44180 100644
+--- a/debian/control
++++ b/debian/control
+@@ -4,12 +4,10 @@ Section: utils
+ Priority: optional
+ Standards-Version: 4.7.0
+ Build-Depends: debhelper-compat (= 13),
+-               cargo,
+                dh-dkms,
+                jq,
+                libaio-dev,
+                libblkid-dev,
+-               libclang-dev,
+                libfuse3-dev,
+                libkeyutils-dev,
+                liblz4-dev,
+@@ -22,7 +20,6 @@ Build-Depends: debhelper-compat (= 13),
+                pkgconf,
+                python3-docutils,
+                python3:native,
+-               rustc (>= 1.77),
+                systemd-dev,
+                uuid-dev,
+                zlib1g-dev,
+diff --git a/debian/rules b/debian/rules
+index 56dc49d0..ce47635f 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -1,16 +1,12 @@
+ #!/usr/bin/make -f
+ 
+ include /usr/share/dpkg/architecture.mk
+-include /usr/share/rustc/architecture.mk
+ 
+ export DH_VERBOSE=1
+ 
+-export DEB_HOST_RUST_TYPE DEB_HOST_GNU_TYPE
++export DEB_HOST_GNU_TYPE
+ 
+ export DEB_BUILD_MAINT_OPTIONS=hardening=+all
+-export CARGO=/usr/share/cargo/bin/cargo
+-export CARGO_HOME=$(CURDIR)/debian/cargo_home
+-export DEB_CARGO_CRATE=bcachefs-tools_$(DEB_VERSION_UPSTREAM)
+ 
+ NUMJOBS = 1
+ ifneq (,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+@@ -29,27 +25,19 @@ ifeq ($(DEB_BUILD_ARCH),amd64)
+     DEB_BUILD_MAINT_OPTIONS += optimize=-lto
+ endif
+ 
+-export CARGO_ARGS = "--frozen"
+-
+ %:
+ 	dh $@ --parallel --with dkms
+ 
+ override_dh_clean:
+-	# HACK: breaks cargo checksumming by deleting some vendored files.
+-
+-cargo_config:
+-	rm -rf .cargo
+-	mkdir -p .cargo
+-	cp debian/cargo.config .cargo/config.toml
++	# HACK: breaks checksumming by deleting some vendored files.
+ 
+ override_dh_auto_build:
+-	$(MAKE) -f debian/rules cargo_config
++	$(MAKE) -f debian/rules
+ 	dh_auto_build
+ 
+ override_dh_auto_clean:
+-	$(MAKE) -f debian/rules cargo_config
++	$(MAKE) -f debian/rules
+ 	dh_auto_clean
+-	rm -rf .cargo
+ 
+ override_dh_usrlocal:
+ 	# FIXME: fails with
+diff --git a/include/linux/printk.h b/include/linux/printk.h
+index 31ff7b65..5b15ce5a 100644
+--- a/include/linux/printk.h
++++ b/include/linux/printk.h
+@@ -206,6 +206,6 @@ void printk(const char *fmt, ...);
+ 	no_printk(KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
+ #endif
+ 
+-void dump_stack(void);
++static inline void dump_stack(void) {};
+ 
+ #endif /* __TOOLS_LINUX_PRINTK_H */
+diff --git a/make-release-tarball.sh b/make-release-tarball.sh
+index c468da77..8f15be2b 100755
+--- a/make-release-tarball.sh
++++ b/make-release-tarball.sh
+@@ -7,15 +7,12 @@ version=$1
+ git checkout v$version
+ git clean -xfd
+ 
+-cargo license > COPYING.rust-dependencies
+-
+ git ls-files|
+     tar --create --file bcachefs-tools-$version.tar -T -	\
+ 	--transform="s_^_bcachefs-tools-$version/_"
+ 
+ tar --append --file bcachefs-tools-$version.tar			\
+-    --transform="s_^_bcachefs-tools-$version/_"			\
+-    COPYING.rust-dependencies
++    --transform="s_^_bcachefs-tools-$version/_"
+ 
+ zstd -z --ultra			bcachefs-tools-$version.tar
+ 
+@@ -28,25 +25,9 @@ scp bcachefs-tools-$version.tar.zst	evilpiepirate.org:/var/www/htdocs/bcachefs-t
+ scp bcachefs-tools-$version.tar.asc	evilpiepirate.org:/var/www/htdocs/bcachefs-tools/
+ scp bcachefs-tools-$version.tar.sign	evilpiepirate.org:/var/www/htdocs/bcachefs-tools/
+ 
+-cargo vendor
+-
+-mkdir .cargo
+-cat > .cargo/config.toml <<-ZZ
+-[source.crates-io]
+-replace-with = "vendored-sources"
+-
+-[source."git+https://evilpiepirate.org/git/rust-bindgen.git"]
+-git = "https://evilpiepirate.org/git/rust-bindgen.git"
+-replace-with = "vendored-sources"
+-
+-[source.vendored-sources]
+-directory = "vendor"
+-ZZ
+-
+ cp bcachefs-tools-$version.tar bcachefs-tools-vendored-$version.tar
+ tar --append --file bcachefs-tools-vendored-$version.tar	\
+-    --transform="s_^_bcachefs-tools-$version/_"			\
+-    .cargo vendor
++    --transform="s_^_bcachefs-tools-$version/_"
+ 
+ zstd -z --ultra			bcachefs-tools-vendored-$version.tar
+ 
+diff --git a/packaging/bcachefs-tools.spec b/packaging/bcachefs-tools.spec
+index 97a83e27..af05a96c 100644
+--- a/packaging/bcachefs-tools.spec
++++ b/packaging/bcachefs-tools.spec
+@@ -8,8 +8,8 @@ License:        GPLv2
+ URL:            https://github.com/koverstreet/bcachefs-tools
+ 
+ BuildRequires:  gcc
++BuildRequires:  gdb-headless
+ BuildRequires:  make
+-BuildRequires:  cargo
+ BuildRequires:  clang-devel
+ BuildRequires:  keyutils-libs-devel
+ BuildRequires:  libaio-devel
+-- 
+2.39.5 (Apple Git-154)
+
