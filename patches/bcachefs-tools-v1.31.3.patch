@@ -1,11 +1,11 @@
-From de6aeb2c5a7a9d5409756a95b8e35166e471fc1a Mon Sep 17 00:00:00 2001
+From acc960d921f8afefc58fff9c6a672a8b52f6e72d Mon Sep 17 00:00:00 2001
 From: Benstone Zhang <benstonezhang@gmail.com>
-Date: Sat, 27 Sep 2025 20:19:19 +0800
+Date: Sun, 28 Sep 2025 11:26:45 +0800
 Subject: [PATCH] remove dependency on rust
 
 ---
  INSTALL.md                    |  11 +-
- Makefile                      |  49 +------
+ Makefile                      |  51 +------
  Makefile.compiler             |  17 ---
  README.md                     |  11 ++
  c_src/bcachefs.c              | 108 ++++++++++++++
@@ -15,15 +15,14 @@ Subject: [PATCH] remove dependency on rust
  c_src/cmd_subvolume.c         | 208 +++++++++++++++++++++++++++
  c_src/cmd_super.c             |   2 +-
  c_src/cmds.h                  |   4 +
- c_src/tools-util.c            |  83 ++++++++++-
+ c_src/tools-util.c            | 114 ++++++++++++++-
  c_src/tools-util.h            |  21 +++
- debian/control                |   3 -
+ debian/control                |   4 +-
  debian/rules                  |  20 +--
  include/linux/printk.h        |   2 +-
  make-release-tarball.sh       |  23 +--
  packaging/bcachefs-tools.spec |   2 +-
- 19 files changed, 930 insertions(+), 115 deletions(-)
- delete mode 120000 bcachefs
+ 18 files changed, 963 insertions(+), 115 deletions(-)
  create mode 100644 c_src/cmd_completions.c
  create mode 100644 c_src/cmd_list.c
  create mode 100644 c_src/cmd_mount.c
@@ -59,7 +58,7 @@ index 89f55071..a646a818 100644
  
  openSUSE: install build dependencies with:
 diff --git a/Makefile b/Makefile
-index 9e41dcd4..6645a578 100644
+index 9e41dcd4..24f92d04 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,4 +1,4 @@
@@ -117,7 +116,8 @@ index 9e41dcd4..6645a578 100644
  CFLAGS+=$(call cc-disable-warning, gnu-variable-sized-type-not-at-end)
 -export RUSTFLAGS:=$(RUSTFLAGS) -C default-linker-libraries
  
- PKGCONFIG_LIBS="blkid uuid liburcu libsodium zlib liblz4 libzstd libudev libkeyutils"
+-PKGCONFIG_LIBS="blkid uuid liburcu libsodium zlib liblz4 libzstd libudev libkeyutils"
++PKGCONFIG_LIBS="blkid uuid liburcu libsodium zlib liblz4 libzstd libudev libkeyutils libunwind"
  ifdef BCACHEFS_FUSE
  	PKGCONFIG_LIBS+="fuse3 >= 3.7"
  	CFLAGS+=-DBCACHEFS_FUSE
@@ -1070,10 +1070,18 @@ index fa4b87a9..c137d16e 100644
 +
  #endif /* _CMDS_H */
 diff --git a/c_src/tools-util.c b/c_src/tools-util.c
-index 7733b9e9..b75dfac7 100644
+index 7733b9e9..b5315bc1 100644
 --- a/c_src/tools-util.c
 +++ b/c_src/tools-util.c
-@@ -22,7 +22,6 @@
+@@ -17,12 +17,14 @@
+ #include <blkid.h>
+ #include <uuid/uuid.h>
+ 
++#define UNW_LOCAL_ONLY
++#include <libunwind.h>
++
+ #include "libbcachefs.h"
+ #include "libbcachefs/bcachefs_ioctl.h"
  #include "linux/sort.h"
  #include "tools-util.h"
  #include "libbcachefs/util.h"
@@ -1081,7 +1089,7 @@ index 7733b9e9..b75dfac7 100644
  
  void die(const char *fmt, ...)
  {
-@@ -656,6 +655,14 @@ got_model:
+@@ -656,6 +658,14 @@ got_model:
  	}
  }
  
@@ -1096,7 +1104,7 @@ index 7733b9e9..b75dfac7 100644
  static int kstrtoull_symbolic(const char *s, unsigned int base, unsigned long long *res)
  {
  	if (!strcmp(s, "U64_MAX")) {
-@@ -781,6 +788,8 @@ darray_const_str get_or_split_cmdline_devs(int argc, char *argv[])
+@@ -781,6 +791,8 @@ darray_const_str get_or_split_cmdline_devs(int argc, char *argv[])
  		char *dev = bch2_scan_devices(argv[0]);
  
  		bch2_split_devs(dev, &ret);
@@ -1105,7 +1113,7 @@ index 7733b9e9..b75dfac7 100644
  	} else {
  		for (unsigned i = 0; i < argc; i++)
  			darray_push(&ret, strdup(argv[i]));
-@@ -799,3 +808,75 @@ char *pop_cmd(int *argc, char *argv[])
+@@ -799,3 +811,103 @@ char *pop_cmd(int *argc, char *argv[])
  
  	return cmd;
  }
@@ -1181,6 +1189,34 @@ index 7733b9e9..b75dfac7 100644
 +		return xstrdup(devs_str);
 +	}
 +}
++
++void dump_stack(void)
++{
++	unw_cursor_t cursor;
++	unw_context_t context;
++
++	// grab the machine context and initialize the cursor
++	if (unw_getcontext(&context) < 0)
++		die("ERROR: cannot get local machine state\n");
++
++	if (unw_init_local(&cursor, &context) < 0)
++		die("ERROR: cannot initialize cursor for local unwinding\n");
++
++	unw_word_t offset, pc;
++	char sym[4096];
++
++	// currently the IP is within backtrace() itself so this loop deliberately skips the first frame.
++	while (unw_step(&cursor) > 0) {
++		if (unw_get_reg(&cursor, UNW_REG_IP, &pc))
++			die("ERROR: cannot read program counter\n");
++
++		printf("0x%lx: ", pc);
++		if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0)
++			printf("(%s+0x%lx)\n", sym, offset);
++		else
++			printf("-- no symbol name found\n");
++	}
++}
 diff --git a/c_src/tools-util.h b/c_src/tools-util.h
 index 988e2d62..656bd6a7 100644
 --- a/c_src/tools-util.h
@@ -1234,10 +1270,10 @@ index 988e2d62..656bd6a7 100644
  
  #endif /* _TOOLS_UTIL_H */
 diff --git a/debian/control b/debian/control
-index 54e1df5a..8dc44180 100644
+index 54e1df5a..43665b44 100644
 --- a/debian/control
 +++ b/debian/control
-@@ -4,12 +4,10 @@ Section: utils
+@@ -4,25 +4,23 @@ Section: utils
  Priority: optional
  Standards-Version: 4.7.0
  Build-Depends: debhelper-compat (= 13),
@@ -1250,7 +1286,13 @@ index 54e1df5a..8dc44180 100644
                 libfuse3-dev,
                 libkeyutils-dev,
                 liblz4-dev,
-@@ -22,7 +20,6 @@ Build-Depends: debhelper-compat (= 13),
+                libscrypt-dev,
+                libsodium-dev,
+                libudev-dev,
++               libunwind-dev,
+                liburcu-dev (>= 0.15),
+                libzstd-dev,
+                linux-libc-dev (>= 6.12),
                 pkgconf,
                 python3-docutils,
                 python3:native,
@@ -1312,7 +1354,7 @@ index 56dc49d0..ce47635f 100755
  override_dh_usrlocal:
  	# FIXME: fails with
 diff --git a/include/linux/printk.h b/include/linux/printk.h
-index 31ff7b65..5b15ce5a 100644
+index 31ff7b65..53fa8922 100644
 --- a/include/linux/printk.h
 +++ b/include/linux/printk.h
 @@ -206,6 +206,6 @@ void printk(const char *fmt, ...);
@@ -1320,7 +1362,7 @@ index 31ff7b65..5b15ce5a 100644
  #endif
  
 -void dump_stack(void);
-+static inline void dump_stack(void) {};
++extern void dump_stack(void);
  
  #endif /* __TOOLS_LINUX_PRINTK_H */
 diff --git a/make-release-tarball.sh b/make-release-tarball.sh
