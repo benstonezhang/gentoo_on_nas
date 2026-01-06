@@ -1,0 +1,26 @@
+mapnik: v4.0.2
+--------------------------------------
+diff --git a/configure b/configure
+index 39fd48c7d..f3b112fdd 100755
+--- a/configure
++++ b/configure
+@@ -22,11 +22,10 @@ fi
+ # These do not normally need to be set except when
+ # building against binary versions of dependencies like
+ # done via bootstrap.sh
+-VARS=()
+ if [ -f mapnik-settings.env ]; then
+     echo "Inheriting from mapnik-settings.env"
+     . ./mapnik-settings.env
+     VARS=( $(cat mapnik-settings.env) )
+ fi
+ 
+-$PYTHON scons/scons.py --implicit-deps-changed configure ${VARS[*]} "$@"
++$PYTHON scons/scons.py --implicit-deps-changed configure ${VARS[*]:-} "$@"
+--------------------------------------
+
+./configure PREFIX=~/.local PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config ICU_INCLUDES=/opt/homebrew/opt/icu4c/include ICU_LIBS=/opt/homebrew/opt/icu4c/lib SQLITE_INCLUDES=/opt/homebrew/opt/sqlite3/include SQLITE_LIBS=/opt/homebrew/opt/sqlite3/lib FREETYPE_CONFIG=/opt/homebrew/opt/freetype/bin/freetype-config BOOST_INCLUDES=/opt/homebrew/include BOOST_LIBS=/opt/homebrew/lib CUSTOM_CFLAGS='-I/opt/homebrew/include' CUSTOM_LDFLAGS='-L/opt/homebrew/lib' && JOBS=8 make install
+
+node-mapnik: v4.6.1
+npm install --build-from-source --loglevel=verbose --global
+

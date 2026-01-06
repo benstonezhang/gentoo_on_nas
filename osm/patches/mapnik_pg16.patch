@@ -1,0 +1,38 @@
+--- a/icutranslit/osml10n_translit.cpp    2024-11-15 19:30:06.465461968 +0800
++++ b/icutranslit/osml10n_translit.cpp    2024-11-15 19:30:25.195604605 +0800
+@@ -20,6 +20,16 @@
+ extern "C" {
+ 
+ #include <postgres.h>
++
++#ifdef PG_VERSION_NUM
++#if PG_VERSION_NUM >= 160000
++#include <varatt.h>
++#ifndef Abs
++#define Abs(x)  ((x) >= 0 ? (x) : -(x))
++#endif
++#endif
++#endif
++
+ #include <stdlib.h>
+ #include <string.h>
+ #include <mb/pg_wchar.h>
+--- a/kanjitranscript/kanjitranscript.c   2024-11-15 19:33:10.816865870 +0800
++++ b/kanjitranscript/kanjitranscript.c   2024-11-15 19:33:54.367197523 +0800
+@@ -10,6 +10,16 @@
+ 
+ */
+ #include <postgres.h>
++
++#ifdef PG_VERSION_NUM
++#if PG_VERSION_NUM >= 160000
++#include <varatt.h>
++#ifndef Abs
++#define Abs(x)  ((x) >= 0 ? (x) : -(x))
++#endif
++#endif
++#endif
++
+ #include <stdlib.h>
+ #include <string.h>
+ #include <errno.h>
