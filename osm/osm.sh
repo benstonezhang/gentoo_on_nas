@@ -59,17 +59,12 @@ export PYTHONPATH=${OPENMAPTILES_TOOLS_SRC}
 SPRITEZERO_PYTHON_GIT=https://github.com/benstonezhang/spritezero_python.git
 SPRITEZERO_PYTHON_SRC="${SRC_DIR}/spritezero_python"
 
-MARTIN_GIT=https://github.com/maplibre/martin.git
-MARTIN_SRC="${SRC_DIR}/martin"
-MARTIN_VERSION=martin-v1.2.0
-MARTIN_FEATURES='mbtiles,postgres'
-
 IMPOSM_CONFIG="${IMPORT_DIR}/config.json"
 
 function usage() {
 	set +x
 	cat <<EOF
-Usage: $0 [env|build|import|read|append|write|optimize|deploy|autodiff|diff|tables|martin|cache_tiles] ...
+Usage: $0 [env|build|import|read|read2|write|autodiff|diff|tables|cache_tiles] ...
 
 Please follow steps below:
    1. source your python virtual environment
@@ -77,14 +72,11 @@ Please follow steps below:
    3. build style and sprite:				$0 build
    4. import additional resource:			$0 import
    5. convert osm pbf file to leveldb:			$0 read [planet-yymmdd.osm.pbf]
-   6. (optional) add more pbf files:			$0 append [region-yymmdd.osm.pbf]
+   6. (optional) add more pbf files:			$0 read2 [region-yymmdd.osm.pbf]
    7. write data from leveldb to postgresql:		$0 write
-   8. generate derivative tables and indices:		$0 generate
-   9. public tables and views:				$0 deploy
-  10. create table for query:				$0 tables
-  11. build martin tile server and generate config	$0 martin
-  12. setup nginx and start martin
-  13. (optional) pre-generate nginx cache:		$0 cache_tiles
+      (generate derivative tables and indices then public tables and views)
+   8. create tables and functions for query:		$0 tables
+   9. (optional) pre-generate nginx cache:		$0 cache_tiles
 EOF
 	exit 1
 }
@@ -196,6 +188,7 @@ set -ex
 
 case $1 in
 	env)
+		set +x
 		echo -n "checking openmaptiles ... "
 		if [ -d "${OPENMAPTILES_SRC}" ]; then
 			echo "found"
@@ -222,6 +215,7 @@ case $1 in
 		git -C "${SPRITEZERO_PYTHON_SRC}" checkout main
 		pip install -r "${SPRITEZERO_PYTHON_SRC}/requirements.txt"
 		gen_imposm_conf
+		set -x
 		;;
 	build)
 		POSTGIS_VERSION=$(find /usr -name postgis.sql -print0 2>/dev/null | xargs -0 grep 'INSTALL VERSION' | awk '{print $4}' | sed "s/'//g")
@@ -283,42 +277,25 @@ case $1 in
 		pbf="$2"
 		shift 2
 		imposm import -config "${IMPOSM_CONFIG}" -read "$pbf" -diff "$@"
-		rm -f "${IMPOSM_CONFIG}";;
-	append)
+		;;
+	read2)
 		pbf="$2"
 		shift 2
 		imposm import -config "${IMPOSM_CONFIG}" -read "$pbf" -diff -appendcache "$@"
-		rm -f "${IMPOSM_CONFIG}";;
+		;;
 	write)
-		imposm import -config "${IMPOSM_CONFIG}" -write
-		rm -f "${IMPOSM_CONFIG}";;
-	generate)
-		imposm import -config "${IMPOSM_CONFIG}" -generate -optimize
-		rm -f "${IMPOSM_CONFIG}";;
-	deploy)
-		imposm import -config "${IMPOSM_CONFIG}" -deployproduction
-		rm -f "${IMPOSM_CONFIG}";;
+		imposm import -config "${IMPOSM_CONFIG}" -write -generate -optimize -deployproduction
+		;;
 	autodiff)
 		imposm run -config "${IMPOSM_CONFIG}"
-		rm -f "${IMPOSM_CONFIG}";;
+		;;
 	diff)
 		shift 1
 		imposm diff -config "${IMPOSM_CONFIG}" "$@"
-		rm -f "${IMPOSM_CONFIG}";;
+		;;
 	tables)
 		import_tables "${OPENMAPTILES_TOOLS_SRC}/sql"
 		bulk_import_tables "${IMPORT_DIR}/sql"
-		;;
-	martin)
-		echo -n "checking martin ... "
-		if [ -d "${MARTIN_SRC}" ]; then
-			echo "found"
-		else
-			echo "not exist, create"
-			git clone "${MARTIN_GIT}" "${MARTIN_SRC}"
-		fi
-		git -C "${MARTIN_SRC}" checkout main
-		cargo build -C "${MARTIN_SRC}" --release --lock --package martin --features="${MARTIN_FEATURES}"
 		;;
 	cache_tiles)
 		minz=${2:-0}
