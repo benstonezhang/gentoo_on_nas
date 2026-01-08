@@ -9,13 +9,18 @@ if [ -z "$OSM_VIEWER_PASSWORD" ]; then
 	exit 1
 fi
 
-cat <<EOF | psql -d osm
+PGHOST=${PGHOST:-"127.0.0.1"}
+PGPORT=${PGPORT:-"5432"}
+PGDATABASE=${PGDATABASE:-"osm"}
+PGUSER=${PGUSER:-"osm_viewer"}
+
+cat <<EOF | psql -d "${PGDATABASE}"
 CREATE ROLE readaccess;
-GRANT CONNECT ON DATABASE osm TO readaccess;
+GRANT CONNECT ON DATABASE '${PGDATABASE}' TO readaccess;
 GRANT USAGE ON SCHEMA public TO readaccess;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO readaccess;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO readaccess;
-CREATE USER osm_viewer WITH PASSWORD '$OSM_VIEWER_PASSWORD';
-GRANT readaccess TO osm_viewer;
+CREATE USER '${PGUSER}' WITH PASSWORD '${OSM_VIEWER_PASSWORD}';
+GRANT readaccess TO '${PGUSER}';
 EOF
 

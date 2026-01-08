@@ -9,11 +9,16 @@ if [ -z "$OSM_PASSWORD" ]; then
 	exit 1
 fi
 
-createuser --no-superuser --no-createrole --createdb osm
-createdb -E UTF8 -O osm osm
+PGHOST=${PGHOST:-"127.0.0.1"}
+PGPORT=${PGPORT:-"5432"}
+PGDATABASE=${PGDATABASE:-"osm"}
+PGUSER=${PGUSER:-"osm"}
 
-cat <<EOF | psql -d osm
-alter user osm with password '$OSM_PASSWORD';
+createuser --no-superuser --no-createrole --createdb "${PGUSER}"
+createdb -E UTF8 -O "${PGUSER}" "${PGDATABASE}"
+
+cat <<EOF | psql -d "${PGDATABASE}"
+alter user '${PGUSER}' with password '${OSM_PASSWORD}';
 create extension if not exists postgis;
 create extension if not exists hstore;
 create extension if not exists fuzzystrmatch;
@@ -28,7 +33,7 @@ EOF
 cat <<EOF
 You may need to update pg_hba.conf, add below and restart postgresql!:
 ===============================================================================
-host	osm		osm		127.0.0.1/32		scram-sha-256
+host	${PGDATABASE}	${PGUSER}	127.0.0.1/32		scram-sha-256
 ===============================================================================
 
 echo "Done."

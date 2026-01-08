@@ -1,9 +1,8 @@
 #!/bin/bash
 
-SCRIPT_DIR=$(realpath "$(dirname "$0")")
 SRC_DIR=${SRC_DIR:-"$HOME/src"}
-MAPS_DIR=${MAPS_DIR:-"$SCRIPT_DIR/maps"}
-IMPORT_DIR=${IMPORT_DIR:-"$SCRIPT_DIR/import"}
+MAPS_DIR=${MAPS_DIR:-"$PWD/maps"}
+IMPORT_DIR=${IMPORT_DIR:-"$PWD/import"}
 MAP_SERVICE_URL=${MAP_SERVICE_URL:-}
 
 PGHOST=${PGHOST:-"127.0.0.1"}
@@ -72,11 +71,11 @@ Please follow steps below:
    3. build style and sprite:				$0 build
    4. import additional resource:			$0 import
    5. convert osm pbf file to leveldb:			$0 read [planet-yymmdd.osm.pbf]
-   6. (optional) add more pbf files:			$0 read2 [region-yymmdd.osm.pbf]
-   7. write data from leveldb to postgresql:		$0 write
+      (optional) add more pbf files:			$0 read2 [region-yymmdd.osm.pbf]
+   6. write data from leveldb to postgresql:		$0 write
       (generate derivative tables and indices then public tables and views)
-   8. create tables and functions for query:		$0 tables
-   9. (optional) pre-generate nginx cache:		$0 cache_tiles
+   7. create tables and functions for query:		$0 tables
+   8. (optional) pre-generate nginx cache:		$0 cache_tiles
 EOF
 	exit 1
 }
@@ -192,6 +191,10 @@ case $1 in
 		echo -n "checking openmaptiles ... "
 		if [ -d "${OPENMAPTILES_SRC}" ]; then
 			echo "found"
+			echo 'updating ...'
+			git -C "${OPENMAPTILES_SRC}" reset --hard
+			git -C "${OPENMAPTILES_SRC}" checkout master
+			git -C "${OPENMAPTILES_SRC}" pull --all --force
 		else
 			echo "not exist, create"
 			git clone "${OPENMAPTILES_GIT}" "${OPENMAPTILES_SRC}"
@@ -199,6 +202,10 @@ case $1 in
 		echo -n "checking openmaptiles-tools ... "
 		if [ -d "${OPENMAPTILES_TOOLS_SRC}" ]; then
 			echo "found"
+			echo 'updating ...'
+			git -C "${OPENMAPTILES_TOOLS_SRC}" reset --hard
+			git -C "${OPENMAPTILES_TOOLS_SRC}" checkout master
+			git -C "${OPENMAPTILES_TOOLS_SRC}" pull --all --force
 		else
 			echo "not exist, create"
 			git clone "${OPENMAPTILES_TOOLS_GIT}" "${OPENMAPTILES_TOOLS_SRC}"
@@ -208,6 +215,10 @@ case $1 in
 		echo -n "checking spritezero_python ... "
 		if [ -d "${SPRITEZERO_PYTHON_SRC}" ]; then
 			echo "found"
+			echo 'updating ...'
+			git -C "${SPRITEZERO_PYTHON_SRC}" reset --hard
+			git -C "${SPRITEZERO_PYTHON_SRC}" checkout master
+			git -C "${SPRITEZERO_PYTHON_SRC}" pull --all --force
 		else
 			echo "not exist, create"
 			git clone "${SPRITEZERO_PYTHON_GIT}" "${SPRITEZERO_PYTHON_SRC}"
@@ -231,9 +242,10 @@ case $1 in
 		python "${OPENMAPTILES_TOOLS_SRC}/bin/generate-sqltomvt" "${OPENMAPTILES_SRC}/openmaptiles.yaml" --key --postgis-ver $POSTGIS_VERSION --function --fname=getmvt >> "${IMPORT_DIR}/sql/run_last.sql"
 		mkdir -p "${IMPORT_DIR}/style"
 		python "${OPENMAPTILES_TOOLS_SRC}/bin/style-tools" recompose "${OPENMAPTILES_SRC}/openmaptiles.yaml" "${IMPORT_DIR}/style/style.json" "${OPENMAPTILES_SRC}/style/style-header.json"
-		if [ -n "${MAP_SERVICE_URL}" ]; then
-			sed "s|\"url\": \".*\"|\"url\": \"${MAP_SERVICE_URL}/tiles/getmvt\"|; s|\"glyphs\": \"|\"glyphs\": \"${MAP_SERVICE_URL}/fonts/|; s|\"sprite\": \"|\"sprite\": \"${MAP_SERVICE_URL}/style/|" -i "${IMPORT_DIR}/style/style.json"
-		fi
+		mkdir -p "${IMPORT_DIR}/osm"
+		echo '<?php header('Content-Type: application/json'); ?>' > "${IMPORT_DIR}/osm/style.php"
+		cat "${IMPORT_DIR}/style/style.json" >> "${IMPORT_DIR}/osm/style.php"
+		sed 's|"url": ".*"|"url": "<?php echo $_SERVER["SERVER_URI"] ?>/maps/tiles/getmvt"|; s|"glyphs": "[^{]*{|"glyphs": "<?php echo $_SERVER["SERVER_URI"] ?>/maps/fonts/{|; s|"sprite": ".*sprite|"sprite": "<?php echo $_SERVER["SERVER_URI"] ?>/maps/style/sprite|' -i "${IMPORT_DIR}/osm/style.php"
 		python ${SRC_DIR}/spritezero_python/spritezero.py "${IMPORT_DIR}/style/sprite" "${OPENMAPTILES_SRC}/style/icons"
 		python ${SRC_DIR}/spritezero_python/spritezero.py --retina "${IMPORT_DIR}/style/sprite@2x" "${OPENMAPTILES_SRC}/style/icons"
 		;;
@@ -298,6 +310,10 @@ case $1 in
 		bulk_import_tables "${IMPORT_DIR}/sql"
 		;;
 	cache_tiles)
+		if [ -z "${MAP_SERVICE_URL}" ]; then
+			echo 'Please set MAP_SERVICE_URL'
+			exit 1
+		fi
 		minz=${2:-0}
 		maxz=${3:-$minz}
 		for z in $(seq $minz $maxz); do
@@ -310,6 +326,10 @@ case $1 in
 		done
 		;;
 	cache_tiles_verbose)
+		if [ -z "${MAP_SERVICE_URL}" ]; then
+			echo 'Please set MAP_SERVICE_URL'
+			exit 1
+		fi
 		set +x
 		minz=${2:-0}
 		maxz=${3:-$minz}
