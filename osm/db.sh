@@ -18,15 +18,15 @@ createuser --no-superuser --no-createrole --createdb "${PGUSER}"
 createdb -E UTF8 -O "${PGUSER}" "${PGDATABASE}"
 
 cat <<EOF | psql -d "${PGDATABASE}"
-alter user '${PGUSER}' with password '${OSM_PASSWORD}';
-create extension if not exists postgis;
-create extension if not exists hstore;
-create extension if not exists fuzzystrmatch;
-create extension if not exists pg_stat_statements;
+ALTER USER '${PGUSER}' WITH PASSWORD '${OSM_PASSWORD}';
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS hstore;
+CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 -- Extensions needed for OpenMapTiles
-create extension if not exists unaccent;
-create extension if not exists osml10n;
-create extension if not exists gzip;
+CREATE EXTENSION IF NOT EXISTS unaccent;
+CREATE EXTENSION IF NOT EXISTS osml10n;
+CREATE EXTENSION IF NOT EXISTS gzip;
 EOF
 
 # check the pg_hba.conf file below has the correct path
