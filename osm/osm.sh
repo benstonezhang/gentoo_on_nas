@@ -217,13 +217,12 @@ case $1 in
 			echo "found"
 			echo 'updating ...'
 			git -C "${SPRITEZERO_PYTHON_SRC}" reset --hard
-			git -C "${SPRITEZERO_PYTHON_SRC}" checkout master
+			git -C "${SPRITEZERO_PYTHON_SRC}" checkout main
 			git -C "${SPRITEZERO_PYTHON_SRC}" pull --all --force
 		else
 			echo "not exist, create"
 			git clone "${SPRITEZERO_PYTHON_GIT}" "${SPRITEZERO_PYTHON_SRC}"
 		fi
-		git -C "${SPRITEZERO_PYTHON_SRC}" checkout main
 		pip install -r "${SPRITEZERO_PYTHON_SRC}/requirements.txt"
 		gen_imposm_conf
 		set -x
