@@ -18,7 +18,7 @@ createuser --no-superuser --no-createrole --createdb "${PGUSER}"
 createdb -E UTF8 -O "${PGUSER}" "${PGDATABASE}"
 
 cat <<EOF | psql -d "${PGDATABASE}"
-ALTER USER '${PGUSER}' WITH PASSWORD '${OSM_PASSWORD}';
+ALTER USER ${PGUSER} WITH PASSWORD '${OSM_PASSWORD}';
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE EXTENSION IF NOT EXISTS hstore;
 CREATE EXTENSION IF NOT EXISTS fuzzystrmatch;
