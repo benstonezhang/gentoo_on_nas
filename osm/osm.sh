@@ -71,11 +71,10 @@ Please follow steps below:
    3. build style and sprite:				$0 build
    4. import additional resource:			$0 import
    5. convert osm pbf file to leveldb:			$0 read [planet-yymmdd.osm.pbf]
-      (optional) add more pbf files:			$0 read2 [region-yymmdd.osm.pbf]
-   6. write data from leveldb to postgresql:		$0 write
-      (generate derivative tables and indices then public tables and views)
-   7. create tables and functions for query:		$0 tables
-   8. (optional) pre-generate nginx cache:		$0 cache_tiles
+      (optional) add more pbf files:			$0 read_more [region-yymmdd.osm.pbf]
+   6. deploy data to postgresql:			$0 export
+      (write data from leveldb to postgresql; generate derivative tables and indices; public tables and views; create tables and functions for query)
+   7. (optional) pre-generate nginx cache:		$0 cache_tiles
 EOF
 	exit 1
 }
@@ -289,13 +288,10 @@ case $1 in
 		shift 2
 		imposm import -config "${IMPOSM_CONFIG}" -read "$pbf" -diff "$@"
 		;;
-	read2)
+	read_more)
 		pbf="$2"
 		shift 2
 		imposm import -config "${IMPOSM_CONFIG}" -read "$pbf" -diff -appendcache "$@"
-		;;
-	write)
-		imposm import -config "${IMPOSM_CONFIG}" -write -generate -optimize -deployproduction
 		;;
 	autodiff)
 		imposm run -config "${IMPOSM_CONFIG}"
@@ -303,6 +299,23 @@ case $1 in
 	diff)
 		shift 1
 		imposm diff -config "${IMPOSM_CONFIG}" "$@"
+		;;
+	export)
+		imposm import -config "${IMPOSM_CONFIG}" -write -generate -optimize -deployproduction
+		import_tables "${OPENMAPTILES_TOOLS_SRC}/sql"
+		bulk_import_tables "${IMPORT_DIR}/sql"
+		;;
+	write)
+		imposm import -config "${IMPOSM_CONFIG}" -write
+		;;
+	generate)
+		imposm import -config "${IMPOSM_CONFIG}" -generate
+		;;
+	optimize)
+		imposm import -config "${IMPOSM_CONFIG}" -optimize
+		;;
+	deploy)
+		imposm import -config "${IMPOSM_CONFIG}" -deployproduction
 		;;
 	tables)
 		import_tables "${OPENMAPTILES_TOOLS_SRC}/sql"
