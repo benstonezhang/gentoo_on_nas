@@ -4,6 +4,7 @@ SRC_DIR=${SRC_DIR:-"$HOME/src"}
 MAPS_DIR=${MAPS_DIR:-"$PWD/maps"}
 IMPORT_DIR=${IMPORT_DIR:-"$PWD/import"}
 MAP_SERVICE_URL=${MAP_SERVICE_URL:-}
+MAX_PROCS=${MAX_PROCS:-2}
 
 PGHOST=${PGHOST:-"127.0.0.1"}
 PGPORT=${PGPORT:-"5432"}
@@ -72,7 +73,7 @@ Please follow steps below:
    4. import additional resource:			$0 import
    5. convert osm pbf file to leveldb:			$0 read [planet-yymmdd.osm.pbf]
       (optional) add more pbf files:			$0 read_more [region-yymmdd.osm.pbf]
-   6. deploy data to postgresql:			$0 export
+   6. deploy data to postgresql:			$0 public
       (write data from leveldb to postgresql; generate derivative tables and indices; public tables and views; create tables and functions for query)
    7. (optional) pre-generate nginx cache:		$0 cache_tiles
 EOF
@@ -143,7 +144,7 @@ function bulk_import_tables() {
 	else
 		echo "File $1/run_first.sql not found, skipping" >&2
 	fi
-	find "$1/parallel" -name "*.sql" -print0 | xargs -0 -I{} --max-procs=4 $PSQL_CLI -f "{}"
+	ls -1S --zero "$1/parallel/"*.sql | xargs -0 -I{} --max-procs=$MAX_PROCS $PSQL_CLI -f "{}"
 	if [ -f "$1/run_last.sql" ]; then
 		$PSQL_CLI -f "$1/run_last.sql"
 	else
@@ -300,7 +301,7 @@ case $1 in
 		shift 1
 		imposm diff -config "${IMPOSM_CONFIG}" "$@"
 		;;
-	export)
+	public)
 		imposm import -config "${IMPOSM_CONFIG}" -write -generate -optimize -deployproduction
 		import_tables "${OPENMAPTILES_TOOLS_SRC}/sql"
 		bulk_import_tables "${IMPORT_DIR}/sql"
